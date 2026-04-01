@@ -1,0 +1,228 @@
+---
+title: "methylation_analysis_v1.Rmd"
+output: html_document
+date: "2026-04-01"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = "hide")
+
+
+```
+
+
+```{r packages}
+if(!require("BiocManager", quietly = T))
+  install.packages("BiocManager")
+
+# Install the necessary bioinformatics packages
+# TCGAbiolinks: for data access
+# GSVA: for the 94-gene signature scoring
+# SummarizedExperiment: the standard data container for TCGA data
+BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+
+install.packages("nloptr")
+install.packages("ggpubr")
+install.packages("cowplot")
+install.packages("gt")
+```
+
+
+```{r load packages}
+library(BiocManager)
+library(TCGAbiolinks)
+library(GSVA)
+library(SummarizedExperiment)
+library(tidyverse)
+library(nloptr)
+library(ggpubr)
+library(cowplot)
+library(gt)
+library(webshot2)
+```
+
+# Check which methylation data are available for candidate cancer types
+```{r}
+
+candidates <- c("TCGA-HNSC", "TCGA-STAD", "TCGA-KIRC", "TCGA-BLCA", 
+                "TCGA-KIRP", "TCGA-BRCA", "TCGA-COAD")
+
+# Query methylation data availability for one cancer first
+query_met <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation 450"
+)
+
+getResults(query_met) %>% 
+  count(sample_type)
+
+#           sample_type   n
+# 1          Metastatic   2
+# 2       Primary Tumor 528
+# 3 Solid Tissue Normal  50
+
+
+```
+
+# Check clinical data availability
+```{r}
+
+# Get clnicial data
+clinical_hnsc <- GDCquery_clinic("TCGA-HNSC", type = "clinical")
+
+clinical_hnsc <- GDCquery_clinic("TCGA-HNSC", type = "BCR XML")
+
+query_clin <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "Clinical",
+  data.type = "Clinical Supplement",
+  data.format = "BCR XML"
+)
+
+GDCdownload(query_clin)
+clinical_hnsc <- GDCprepare_clinic(query_clin, clinical.info = "patient")
+
+# What outcome variables are available?
+colnames(clinical_hnsc)
+
+# Check for specific survival columns 
+clinical_hnsc %>% 
+  select(any_of(c("vital_status", 
+                  "days_to_death",
+                  "days_to_last_followup",
+                  "tumor_stage",
+                  "ajcc_pathologic_stage"))) %>% 
+  View()
+
+clinical_hnsc %>% 
+  select(vital_status, 
+         days_to_death,
+         days_to_last_followup,
+         stage_event_pathologic_stage) %>% 
+  summarise(
+    n_total = n(),
+    n_vital_status = sum(!is.na(vital_status)),
+    n_days_to_death = sum(!is.na(days_to_death)),
+    n_days_to_last_followup = sum(!is.na(days_to_last_followup))
+  )
+
+  # n_total n_vital_status n_days_to_death n_days_to_last_followup
+  #    528            160             170                     314
+
+# The number of patients with vital_status is only 160 ~30%
+# need to define who is dead vs who is censored
+
+# Check how many patients have either days_to_death OR days_to_last_followup but are missing vital_status
+clinical_hnsc %>%
+  count(vital_status, is.na(days_to_death))
+
+
+```
+
+# Data Availability table across all candidate cancer types 
+Checking for methylation, RNA-seq (GSEA, IFN signature score analsyes), DNA-seq (for immunotherapy-related biomarker correlations), and survival data
+```{r}
+check_data_availability <- function(project_id) {
+  
+  message("Checking: ", project_id)
+  
+  # Methylation
+  met <- tryCatch({
+    q <- GDCquery(project = project_id,
+                  data.category = "DNA Methylation",
+                  data.type = "Methylation Beta Value",
+                  platform = "Illumina Human Methylation 450")
+    res <- getResults(q)
+    tibble(
+      n_met_tumor = sum(res$sample_type == "Primary Tumor"),
+      n_met_normal = sum(res$sample_type == "Solid Tissue Normal")
+    )
+  }, error = function(e) tibble(n_met_tumor = NA, n_met_normal = NA))
+  
+  # RNA-seq
+  rna <- tryCatch({
+    q <- GDCquery(project = project_id,
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  workflow.type = "STAR - Counts",
+                  sample.type = c("Primary Tumor", "Solid Tissue Normal"))
+    res <- getResults(q)
+    tibble(
+      n_rna_tumor = sum(res$sample_type == "Primary Tumor"),
+      n_rna_normal = sum(res$sample_type == "Solid Tissue Normal")
+    )
+  }, error = function(e) tibble(n_rna_tumor = NA, n_rna_normal = NA))
+  
+  # DNA-seq (WXS for somatic mutations/TMB/KRAS)
+  dna <- tryCatch({
+  q <- GDCquery(project = project_id,
+                data.category = "Simple Nucleotide Variation",
+                data.type = "Masked Somatic Mutation")
+  res <- getResults(q)
+  tibble(n_dna_tumor = nrow(res))
+}, error = function(e) tibble(n_dna_tumor = NA))
+  # Clinical
+  clin <- tryCatch({
+    q <- GDCquery(project = project_id,
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement",
+                  data.format = "BCR XML")
+    res <- getResults(q)
+    tibble(n_clinical = nrow(res))
+  }, error = function(e) tibble(n_clinical = NA))
+  
+  bind_cols(tibble(project = project_id), met, rna, dna, clin)
+}
+
+# Run across candidates
+candidates <- c("TCGA-HNSC", "TCGA-STAD", "TCGA-KIRC", 
+                "TCGA-BLCA", "TCGA-KIRP", "TCGA-BRCA", "TCGA-COAD")
+
+availability_table <- map_dfr(candidates, check_data_availability)
+
+print(availability_table)
+```
+
+## make table
+```{r}
+
+availability_table %>%
+  gt() %>%
+  tab_header(
+    title = "TCGA Data Availability for Candidate Cancer Types"
+  ) %>%
+  cols_label(
+    project = "Cancer Type",
+    n_met_tumor = "Tumor",
+    n_met_normal = "Normal",
+    n_rna_tumor = "Tumor",
+    n_rna_normal = "Normal",
+    n_dna_tumor = "Tumor",
+    n_clinical = "Cases"
+  ) %>%
+  tab_spanner(label = "Methylation", columns = c(n_met_tumor, n_met_normal)) %>%
+  tab_spanner(label = "RNA-seq", columns = c(n_rna_tumor, n_rna_normal)) %>%
+  tab_spanner(label = "DNA-seq", columns = n_dna_tumor) %>%
+  tab_spanner(label = "Clinical", columns = n_clinical) %>%
+  tab_style(
+    style = cell_fill(color = "#f0f0f0"),
+    locations = cells_body(rows = seq(1, nrow(availability_table), 2))
+  ) %>%
+  opt_table_font(font = "Arial")
+```
+
+
+# Checking things
+```{r}
+q <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "Simple Nucleotide Variation",
+  data.type = "Masked Somatic Mutation"
+)
+```
+
