@@ -23,11 +23,19 @@ if(!require("BiocManager", quietly = T))
 # GSVA: for the 94-gene signature scoring
 # SummarizedExperiment: the standard data container for TCGA data
 BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+BiocManager::install("sesameData")
+BiocManager::install("sesame")
+BiocManager::install("sesame")
+BiocManager::install("edgeR")
+BiocManager::install("org.Hs.eg.db")
 
 install.packages("nloptr")
 install.packages("ggpubr")
 install.packages("cowplot")
 install.packages("gt")
+install.packages("minifi")
+
 ```
 
 
@@ -42,6 +50,12 @@ library(ggpubr)
 library(cowplot)
 library(gt)
 library(webshot2)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(sesameData)
+library(sesame)
+library(edgeR)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
 ```
 
 # Check which methylation data are available for candidate cancer types
@@ -225,4 +239,518 @@ q <- GDCquery(
   data.type = "Masked Somatic Mutation"
 )
 ```
+
+# Can make new script here!!!Look for overlap of Pol III transcribed loci that are RIG-I "engagers" and "non-engagers"
+## Read in coordinate bed file
+```{r}
+pol3_loci <- read.table("~/PolIII_ON_OFF_map_sample_TCGA_5ppp.bed",
+                        header = TRUE,
+                        sep = "\t",
+                        stringsAsFactors = FALSE)
+
+View(pol3_loci)
+dim(pol3_loci)
+# [1] 9663  340
+
+# How many RIG-I recognized loci do we have? ####
+table(pol3_loci$is_5ppp)
+#    0    1 
+# 9531  132 
+
+# What RNA types are in the engager set ####
+pol3_loci %>% 
+  filter(is_5ppp ==1) %>% 
+  count(V8) %>% 
+  arrange(desc(n))
+
+#             V8  n
+# 1         tRNA 80
+# 2   snaR A RNA 14
+# 3       u6 RNA 14
+# 4 snaR B-I RNA 10
+# 5      5S rRNA  7
+# 6        Y RNA  3
+# 7          SRP  2
+# 8        Vault  2
+
+
+# What chromosomes are they on ####
+pol3_loci %>%
+  filter(is_5ppp == 1) %>%
+  count(V1) %>%
+  arrange(desc(n))
+#       V1  n
+# 1   chr6 35
+# 2  chr19 25
+# 3   chr1 15
+# 4   chr7 10
+# 5  chr16  6
+# 6   chr2  5
+# 7  chr10  4
+# 8  chr14  4
+# 9  chr17  4
+# 10  chr5  4
+# 11 chr12  3
+# 12  chr9  3
+# 13 chr11  2
+# 14 chr13  2
+# 15 chr15  2
+# 16  chr4  2
+# 17  chr8  2
+# 18 chr18  1
+# 19 chr20  1
+# 20  chr3  1
+# 21  chrX  1
+
+# Count how many loci are RIG-I engagers by cancer type ####
+
+# get necessary info and convert to long format
+pol3_loci_long <- pol3_loci %>% 
+  mutate(across(c(V2,V3,ACC.265:UCEC.96), as.character)) %>% 
+  select(V1, V2, V3, gene_name, is_5ppp, ACC.265:UCEC.96) %>% 
+  pivot_longer(-c(gene_name, is_5ppp, V1, V2, V3),         #Don't want to pivot these columns
+               names_to = "sample",
+               values_to = "accessibility") %>% #View()  
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+"),
+         accessibility = as.integer(accessibility)) #%>%  View()
+```
+
+## Descriptive summary tables
+```{r}
+# Table 1: locus level count per cancer type and locus engager status ####
+# For each locus, how many samples are accessible, engagers and non-engagers, by cancer type
+
+pol3_loci_long_t1 <-pol3_loci_long %>%
+  group_by(cancer_type, V1, V2, V3, is_5ppp) %>%
+  summarise(
+    n_samples_accessible_at_this_locus = sum(accessibility == 1),
+    n_samples_engagers_at_this_locus = sum(accessibility == 1 & is_5ppp == 1),
+    n_samples_non_engagers_at_this_locus = sum(accessibility == 1 & is_5ppp == 0),
+    n_samples_discrepant_at_this_locus = sum(accessibility == 0 & is_5ppp == 1),
+    .groups = "drop"
+  )
+
+View(pol3_loci_long_t1)
+
+# Table 2 characterizes the triphosphatome landscape across cancer types ####
+# using the lab's BED file (pol3_loci)
+# This table characterizes the triphosphatome landscape across cancer types
+# using the lab's BED file (pol3_loci)
+# - Triphosphatome landscape: how many RIG-I engager (is_5ppp==1) vs 
+#   non-engager (is_5ppp==0) POL III loci are accessible across cancer types
+# - n_total_samples: number of ATAC-seq samples per cancer type in the lab's dataset
+# NOTE: Table 2 filters to accessibility == 1 only
+# Rationale: discrepant samples (is_5ppp == 1 but accessibility == 0) are excluded
+# from downstream methylation analysis (5ppp discrepancy concept)
+# These are loci where RIG-I engagement was determined in HEK293T cells
+# but the locus is not accessible in the TCGA tumor sample
+# Discrepant counts are tracked in table 1 (n_samples_discrepant_at_this_locus)
+# for transparency but not used in downstream analyses
+
+pol3_loci_long_t2 <- pol3_loci_long %>% 
+  filter(accessibility == 1) %>% 
+  group_by(cancer_type) %>% 
+  summarise(
+    n_engager_loci = sum(is_5ppp == 1),
+    n_non_engager_loci = sum(is_5ppp == 0),
+    n_total_samples = n_distinct(sample),
+    .groups = "drop"
+  ) %>% 
+  mutate(pct_engager_loci = n_engager_loci / (n_engager_loci + n_non_engager_loci) * 100)
+
+View(pol3_loci_long_t2)
+```
+
+# Check overlap with TCGA data. Are these loci covered in the TCGA methylation arrays?
+```{r}
+
+# Get TCGA coordinates from GDCportal pull ####
+results_df <- getResults(query_met)
+barcodes <- results_df$cases.submitter_id[results_df$sample_type == "Primary Tumor"][1:2]
+barcodes
+
+query_met_small <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation 450",
+  barcode = barcodes
+)
+
+GDCdownload(query_met_small)
+se_met_small <- GDCprepare(query_met_small)
+probe_coords <- as.data.frame(rowRanges(se_met_small))
+head(probe_coords)
+dim(probe_coords)
+
+# Check overlap with pol III loci ####
+
+pol3_met_gr <- GRanges(
+  seqnames = pol3_loci$V1,
+  ranges = IRanges(start = as.integer(pol3_loci$V2), 
+                   end = as.integer(pol3_loci$V3)),
+  gene_name = pol3_loci$gene_name,
+  is_5ppp = pol3_loci$is_5ppp
+)
+
+# Create GRanges from 450k probes
+pol3_gr <- GRanges(
+  seqnames = pol3_loci$V1,
+  ranges = IRanges(start = as.integer(pol3_loci$V2), 
+                   end = as.integer(pol3_loci$V3)),
+  gene_name = pol3_loci$gene_name,
+  is_5ppp = pol3_loci$is_5ppp
+)
+
+# Create GRanges from 450k probes
+probe_gr <- GRanges(
+  seqnames = probe_coords$seqnames,
+  ranges = IRanges(start = probe_coords$start,
+                   end = probe_coords$end),
+  probe_id = rownames(probe_coords)
+)
+
+# Find overlaps 
+# 320 overlaps out of 9663 polIII loci -- only 3.3% coverage ugh
+overlaps <- findOverlaps(pol3_gr, probe_gr)
+overlaps 
+
+# How many unique POL III loci have coverage
+n_covered <- length(unique(queryHits(overlaps)))
+n_total <- length(pol3_gr)
+cat("Covered loci:", n_covered, "out of", n_total, "(", round(n_covered/n_total*100, 1), "%)\n")
+
+# How many are engagers (is_5ppp=1) vs non-engagers
+covered_loci <- pol3_loci[unique(queryHits(overlaps)), ]
+table(covered_loci$is_5ppp)
+
+# Does TCGA have EPIC (850k) data?
+query_epic <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation EPIC"
+)
+getResults(query_epic) %>% nrow()
+```
+
+# Pivoting - don't have good enough coverage for unsupervised clustering will assign groups based on trisphosphatome and ATACseq data
+
+```{r}
+# Count n_engager_loci per sample
+# Engager = is_5ppp==1 AND accessible==1 (excluding discrepant)
+n_engager_loci_per_sample <- pol3_loci_long %>%
+  filter(accessibility == 1, is_5ppp == 1) %>%
+  group_by(sample, cancer_type) %>%
+  summarise(
+    n_engager_loci = n_distinct(paste(V1, V2, V3)),
+    .groups = "drop"
+  )
+
+# Plot distribution per cancer type
+ggplot(n_engager_loci_per_sample, aes(x = n_engager_loci, fill = cancer_type)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~cancer_type, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Distribution of RIG-I Engager Loci per Sample",
+    x = "N engager loci accessible",
+    y = "N samples"
+  ) +
+  theme(legend.position = "none")
+```
+
+## Annotate samples in bed file with corresponding TCGA barcodes
+```{r}
+# Get metafile table to convert sample indices to project ids then get barcodes to retrieve RNAseq sample data
+
+gdc_sample_metadata <- read_csv("~/gdc_sample_sheet_1.txt")
+View(gdc_sample_metadata)
+
+# Create matching key from project_id
+gdc_sample_metadata <- gdc_sample_metadata %>% 
+  mutate(sample = str_replace(project_id, "TCGA-", "") %>% 
+           str_replace("-", "."))
+
+# Join to n_engager_loci_per_sample
+n_engager_loci_per_sample <- n_engager_loci_per_sample %>% 
+  left_join(gdc_sample_metadata %>% select(sample, case_id, sample_id, sample_type),
+            by = "sample")
+
+View(n_engager_loci_per_sample)
+```
+
+## Classify samples into engagers, non-engagers, and baseline based on triphosphatome and atac-seq
+```{r}
+
+n_engager_loci_per_sample %>% 
+  filter(cancer_type %in% c("HNSC", "STAD", "KIRC", "BLCA", "KIRP", "BRCA", "COAD")) %>%
+  summary()
+
+ #   sample          cancer_type        n_engager_loci    case_id           sample_id         sample_type       
+ # Length:167         Length:167         Min.   :17.00   Length:167         Length:167         Length:167        
+ # Class :character   Class :character   1st Qu.:33.00   Class :character   Class :character   Class :character  
+ # Mode  :character   Mode  :character   Median :38.00   Mode  :character   Mode  :character   Mode  :character  
+ #                                       Mean   :40.02                                                           
+ #                                       3rd Qu.:46.50                                                           
+ #                                       Max.   :69.00     
+
+
+n_engager_loci_per_sample_candidates <- n_engager_loci_per_sample %>%
+  filter(cancer_type %in% c("HNSC", "STAD", "KIRC", "BLCA", "KIRP", "BRCA", "COAD")) %>%
+  group_by(cancer_type) %>%
+  mutate(
+    tertile = ntile(n_engager_loci, 3),
+    group = case_when(
+      tertile == 3 ~ "engager",
+      tertile == 1 ~ "baseline",
+      tertile == 2 ~ "non_engager"
+    )
+  ) %>%
+  ungroup()
+
+# Check group counts per cancer type
+n_engager_loci_per_sample_candidates %>%
+  count(cancer_type, group) %>% View()
+
+# A tibble: 21 × 3
+#    cancer_type group           n
+#    <chr>       <chr>       <int>
+#  1 BLCA        baseline        3
+#  2 BLCA        engager         2
+#  3 BLCA        non_engager     3
+#  4 BRCA        baseline       19
+#  5 BRCA        engager        19
+#  6 BRCA        non_engager    19
+#  7 COAD        baseline       12
+#  8 COAD        engager        12
+#  9 COAD        non_engager    12
+# 10 HNSC        baseline        2
+# 11 HNSC        engager         2
+# 12 HNSC        non_engager     2
+# 13 KIRC        baseline        4
+# 14 KIRC        engager         3
+# 15 KIRC        non_engager     4
+# 16 KIRP        baseline       11
+# 17 KIRP        engager        11
+# 18 KIRP        non_engager    11
+# 19 STAD        baseline        6
+# 20 STAD        engager         5
+# 21 STAD        non_engager     5
+
+
+# Table of groups counts per sample for each cancer type ####
+n_engager_loci_per_sample_candidates %>%
+  count(cancer_type, group) %>%
+  pivot_wider(names_from = group, values_from = n) %>%
+  select(cancer_type, engager, non_engager, baseline) %>%
+  mutate(total = engager + non_engager + baseline) %>%
+  gt() %>%
+  cols_label(
+    cancer_type = "Cancer type",
+    engager = "Engager",
+    non_engager = "Non-engager",
+    baseline = "Baseline",
+    total = "Total"
+  ) %>%
+  tab_header(title = "RIG-I engager group assignments by cancer type") 
+
+```
+
+# DE analysis on candidate cancer types with >=3 samples per group
+Note: HNSC has the strongest biological signal but the smallest ATAC-seq sample size in this dataset.
+```{r}
+# Extract raw counts for DEseq ####
+
+candidates <- c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")
+
+counts_list <- list()
+meta_list <- list()
+
+prepare_rnaseq <- function(cancer_type, matched_samples) {
+  message("Processing ", cancer_type)
+  
+  query <- GDCquery(
+    project = paste0("TCGA-", cancer_type),
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts",
+    sample.type = "Primary Tumor"
+  )
+  
+  se <- GDCprepare(query)
+  
+  # Filter to ATAC-seq matched samples only
+  matched_barcodes <- matched_samples %>%
+    filter(cancer_type == .env$cancer_type) %>%
+    pull(case_id)
+  
+  #se_matched <- se[, se$barcode %in% matched_barcodes]
+  se_matched <- se[, substr(colData(se)$barcode, 1, 12) %in% substr(matched_barcodes, 1, 12)]
+  se_matched <- se_matched[, !duplicated(substr(colData(se_matched)$barcode, 1, 12))]
+  
+  message("  Matched ", ncol(se_matched), " of ", length(matched_barcodes), " samples")
+  
+  list(
+    counts = assay(se_matched, "unstranded"),
+    meta = colData(se_matched) %>%
+      as.data.frame() %>%
+      select(barcode, sample_type) %>%
+      mutate(case_id = substr(barcode, 1, 12)) %>%
+      left_join(
+        matched_samples %>%
+          filter(cancer_type == .env$cancer_type) %>%
+          select(case_id, group, n_engager_loci),
+        by = "case_id"
+      )
+  )
+}
+```
+
+### Try one cancertype fist BRCA
+```{r}
+
+brca_rnaseq_data <- prepare_rnaseq("BRCA", n_engager_loci_per_sample_candidates)
+
+dim(brca_rnaseq_data$counts)
+
+# does meta have group assignments?
+head(brca_rnaseq_data$meta)
+
+# check group distribution
+table(brca_rnaseq_data$meta$group)
+
+# DE analysis for brca #####
+# Create DGEList object
+dge <- DGEList(
+  counts = brca_rnaseq_data$counts,
+  group = brca_rnaseq_data$meta$group
+)
+
+# Filter lowly expressed genes
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+
+# Normalize
+dge <- calcNormFactors(dge)
+
+# Design matrix - engager vs baseline
+design <- model.matrix(~ 0 + group, data = brca_rnaseq_data$meta)
+colnames(design) <- levels(factor(brca_rnaseq_data$meta$group))
+
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+
+# Fit model
+fit <- glmQLFit(dge, design)
+
+# Engager vs baseline contrast
+con <- makeContrasts(engager - non_engager, levels = design)
+qlf <- glmQLFTest(fit, contrast = con)
+
+# Results
+de_results_brca_engager_vs_nonengager <- topTags(qlf, n = Inf)$table
+head(de_results_brca_engager_vs_nonengager)
+
+# Strip version numbers from Ensembl IDs
+de_results_brca_engager_vs_nonengager$ensembl_id <- rownames(de_results_brca_engager_vs_nonengager) %>% 
+  str_remove("\\..*")
+
+# Map to gene symbols
+de_results_brca_engager_vs_nonengager$gene_name <- mapIds(
+  org.Hs.eg.db,
+  keys = de_results_brca_engager_vs_nonengager$ensembl_id,
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+View(de_results_brca_engager_vs_nonengager)
+
+de_results_brca_engager_vs_nonengager %>%
+  filter(FDR < 0.01, !is.na(gene_name)) %>%
+  nrow()
+# 43 genes FDR < 0.01
+
+de_results_brca_engager_vs_nonengager %>%
+  filter(FDR < 0.01, !is.na(gene_name)) %>%
+  count(direction = ifelse(logFC > 0, "up", "down"))
+#   direction  n
+# 1      down 22
+# 2        up 21
+
+# Sanity check -- are any IFN/innate immune genes in the upregulated set?
+de_results_brca_engager_vs_nonengager %>%
+  filter(FDR < 0.01, !is.na(gene_name), logFC > 0) %>%
+  arrange(FDR) %>%
+  pull(gene_name)
+
+# Check in one gene in this upregulated list has any loci that are "engager loci" 5ppp==1 accessibility == 1 that's in rig-i recognized and pol II transcribed ####
+de_results_brca_engager_vs_nonengager %>%
+  filter(gene_name == "ERVFRD-1") %>%
+  dplyr::select(ensembl_id, logFC, FDR)
+
+# Create GRanges for ERVFRD-1
+ervfrd1_gr <- rowRanges(se_brca)[rowData(se_brca)$gene_name == "ERVFRD-1"]
+ervfrd1_gr
+
+# Create GRanges for engager loci in brca
+# Unique engager loci accessible in at least one BRCA sample
+brca_engager_loci <- pol3_loci_long %>%
+  filter(cancer_type == "BRCA",
+         is_5ppp == 1,
+         accessibility == 1) %>%
+  distinct(V1, V2, V3)
+
+# Create GRanges
+engager_gr_brca <- GRanges(
+  seqnames = brca_engager_loci$V1,
+  ranges = IRanges(
+    start = as.integer(brca_engager_loci$V2),
+    end = as.integer(brca_engager_loci$V3)
+  )
+)
+
+# Creat GRanges for upregulated genes
+up_genes <- de_results_brca_engager_vs_nonengager %>%
+  filter(FDR < 0.01, !is.na(gene_name), logFC > 0) %>%
+  pull(gene_name)
+
+up_gr <- rowRanges(se_brca)[rowData(se_brca)$gene_name %in% up_genes]
+up_gr
+
+# Check overlap with upregulated DE genes
+overlaps_up_engager <- findOverlaps(up_gr, engager_gr_brca)
+names(up_gr)[queryHits(overlaps_up_engager)]
+engager_gr_brca[subjectHits(overlaps_up_engager)]
+
+# Check overlap with POL III loci
+overlaps <- findOverlaps(ervfrd1_gr, pol3_gr)
+overlaps
+
+# # Something's wrong with the barcode format. it's returned 0matched samples
+# # query and prepare for brca
+# query_brca <- GDCquery(
+#   project = "TCGA-BRCA",
+#   data.category = "Transcriptome Profiling",
+#   data.type = "Gene Expression Quantification",
+#   workflow.type = "STAR - Counts",
+#   sample.type = "Primary Tumor"
+# )
+# 
+# se_brca <- GDCprepare(query_brca)
+# head(colData(se_brca)$barcode)
+
+# Check if any upregulated genes have "engager" loci
+```
+
+# Need to clean up saving necessary objects to pull into another script where i do the de analysis
+```{r}
+# Save objects for DE analysis script ####
+saveRDS(n_engager_loci_per_sample_candidates, "n_engager_loci_per_sample_candidates.rds")
+saveRDS(pol3_loci_long, "pol3_loci_long.rds")
+saveRDS(pol3_loci, "pol3_loci.rds")
+saveRDS(pol3_gr, "pol3_gr.rds")
+```
+
 
