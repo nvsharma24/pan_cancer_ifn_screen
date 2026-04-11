@@ -105,8 +105,9 @@ prepare_rnaseq <- function(cancer_type, matched_samples) {
     se = se_matched,
     meta = colData(se_matched) %>%
       as.data.frame() %>%
-      dplyr::select(barcode, sample_type) %>%
-      dplyr::filter(barcode %in% colnames(assay(se_matched, "unstranded"))) %>%
+      #dplyr::select(barcode, sample_type) %>%
+      #dplyr::filter(barcode %in% colnames(assay(se_matched, "unstranded"))) %>%
+      #dplyr::distinct(barcode, .keep_all = TRUE) %>%
       mutate(case_id = substr(barcode, 1, 12)) %>%
       left_join(
         matched_samples %>%
@@ -355,26 +356,96 @@ de_results_all <- lapply(candidates, run_de_analysis,
                          ifn_genes = ifn_genes)
 names(de_results_all) <- candidates
 
-#### Debugging_____________________
+#### Debugging_____________________####
 
 # Run just the prepare step for COAD to inspect
-coad_data <- prepare_rnaseq("COAD", n_engager_loci_per_sample_candidates)
-nrow(coad_data$meta)
-ncol(coad_data$counts)
+# coad_data <- prepare_rnaseq("COAD", n_engager_loci_per_sample_candidates)
+# nrow(coad_data$meta)
+# ncol(coad_data$counts)
+# 
+# # Check which barcodes are in counts but not meta
+# setdiff(colnames(coad_data$counts), coad_data$meta$barcode)
+# 
+# # Check which are in meta but not counts
+# setdiff(coad_data$meta$barcode, colnames(coad_data$counts))
+# 
+# table(coad_data$meta$group, useNA = "always")
+# 
+# coad_de <- run_de_analysis("COAD", n_engager_loci_per_sample_candidates, pol3_loci_long, ifn_genes)
+# 
+# length(coad_de$up_genes)
+# coad_de$ifn_overlap
+# coad_de$genes_with_engager_loci
+# coad_de$n_per_group
+# 
+# coad_de$de_results %>%
+#   filter(!is.na(gene_name)) %>%
+#   summarise(
+#     fdr_01 = sum(FDR < 0.01),
+#     fdr_05 = sum(FDR < 0.05),
+#     fdr_10 = sum(FDR < 0.10)
+#   )
 
-# Check which barcodes are in counts but not meta
-setdiff(colnames(coad_data$counts), coad_data$meta$barcode)
-
-# Check which are in meta but not counts
-setdiff(coad_data$meta$barcode, colnames(coad_data$counts))
-
-table(coad_data$meta$group, useNA = "always")
-
-coad_de <- run_de_analysis("COAD", n_engager_loci_per_sample_candidates, pol3_loci_long, ifn_genes)
-
-
-rm(coad_de)
-rm(coad_data)
 ```
 
+# Dig into DE results for all cancer types
+```{r}
+lapply(names(de_results_all), function(ct) {
+  cat("\n", ct, "\n")
+  cat("N per group:", de_results_all[[ct]]$n_per_group, "\n")
+  cat("N up genes FDR<0.01:", length(de_results_all[[ct]]$up_genes), "\n")
+  cat("IFN overlap:", paste(de_results_all[[ct]]$ifn_overlap, collapse=", "), "\n")
+  cat("Genes with engager loci:", paste(de_results_all[[ct]]$genes_with_engager_loci, collapse=", "), "\n")
+})
+
+# Debugging___________________####
+# Now BRCA up genes dropped from 21 to 2 -- figuring out what's going on
+
+
+brca_de_new <- run_de_analysis("BRCA", n_engager_loci_per_sample_candidates, pol3_loci_long, ifn_genes)
+brca_de_new$up_genes
+
+
+n_engager_loci_per_sample_candidates %>%
+  filter(cancer_type == "BRCA") %>%
+  arrange(group, case_id) %>%
+  dplyr::select(case_id, group, n_engager_loci) %>% View()
+
+```
+
+# TRASH Debugging
+```{r}
+brca_data <- prepare_rnaseq("BRCA", n_engager_loci_per_sample_candidates)
+
+dge <- DGEList(counts = brca_data$counts, group = brca_data$meta$group)
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ 0 + group, data = brca_data$meta)
+colnames(design) <- levels(factor(brca_data$meta$group))
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+con <- makeContrasts(engager - non_engager, levels = design)
+qlf <- glmQLFTest(fit, contrast = con)
+results <- topTags(qlf, n = Inf)$table
+results$ensembl_id <- rownames(results) %>% str_remove("\\..*")
+results$gene_name <- mapIds(org.Hs.eg.db, keys = results$ensembl_id,
+                            column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+
+results %>% filter(FDR < 0.01, !is.na(gene_name), logFC > 0) %>% nrow()
+
+n_engager_loci_per_sample_final %>%
+  filter(cancer_type == "BRCA") %>%
+  group_by(case_id) %>%
+  filter(n() > 1)
+
+
+brca_data <- prepare_rnaseq("BRCA", n_engager_loci_per_sample_candidates)
+nrow(brca_data$meta)
+ncol(brca_data$counts)
+table(brca_data$meta$group)
+
+brca_de_test <- run_de_analysis("BRCA", n_engager_loci_per_sample_candidates, pol3_loci_long, ifn_genes)
+length(brca_de_test$up_genes)
+```
 

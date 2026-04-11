@@ -231,7 +231,7 @@ availability_table %>%
 ```
 
 
-# Checking things
+ Checking things
 ```{r}
 q <- GDCquery(
   project = "TCGA-HNSC",
@@ -240,8 +240,8 @@ q <- GDCquery(
 )
 ```
 
-# Can make new script here!!!Look for overlap of Pol III transcribed loci that are RIG-I "engagers" and "non-engagers"
-## Read in coordinate bed file
+
+# Read in coordinate bed file of poliii loci
 ```{r}
 pol3_loci <- read.table("~/PolIII_ON_OFF_map_sample_TCGA_5ppp.bed",
                         header = TRUE,
@@ -317,6 +317,69 @@ pol3_loci_long <- pol3_loci %>%
 
 ## Descriptive summary tables
 ```{r}
+# Tables to categorize the different groups of Pol3 loci ####
+per_sample_loci_summary_df <- pol3_loci_long %>% 
+  group_by(sample) %>% 
+  summarise(
+    n_engager_loci = sum(accessibility == 1 & is_5ppp==1),
+    n_non_engager_loci = sum(accessibility == 1 & is_5ppp==0),
+    n_methylated_loci = sum(accessibility == 0 & is_5ppp ==0),
+    n_discrepant_loci = sum(accessibility==0 & is_5ppp == 1),
+    .groups = "drop"
+  ) %>% 
+  mutate(pct_engager_loci = n_engager_loci/9663) %>%  # percent of pol3 loci that are both accessible and rigi recognized 
+  mutate(pct_accessible_loci_that_are_engager_loci = n_engager_loci/(n_engager_loci + n_non_engager_loci)) #%>% View
+
+
+# plot the distribution of pct_accessible_loci_that_are_engager_loci
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = pct_accessible_loci_that_are_engager_loci, fill = cancer_type)) +
+  geom_histogram(binwidth = 0.005, color = "black", linewidth = 0.3) +
+  facet_wrap(~cancer_type, scales = "free_y") +
+  theme_minimal() +
+  labs(x = "% accessible POL III loci that are RIG-I engagers", y = "N samples") +
+  theme(legend.position = "none")
+
+# number of samples in
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  group_by(cancer_type) %>%
+  mutate(quartile = ntile(pct_accessible_loci_that_are_engager_loci, 4)) %>%
+  count(cancer_type, quartile) %>% View
+
+per_sample_loci_summary_df %>%
+  filter(n_engager_loci == 0) %>%
+  nrow()
+
+
+per_sample_gene_summary_df <- pol3_loci_long %>%
+  filter(accessibility == 1) %>%
+  group_by(sample, gene_name) %>%
+  summarise(
+    n_engager_loci = sum(is_5ppp == 1),
+    n_non_engager_loci = sum(is_5ppp == 0),
+    n_total_accessible = n(),
+    pct_engager = n_engager_loci / n_total_accessible,
+    .groups = "drop"
+  ) %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+"))
+
+per_sample_gene_summary_df %>% filter(sample == "COAD.106") %>% count(pct_engager)
+# A tibble: 7 × 2
+#   pct_engager     n
+#         <dbl> <int>
+# 1       0       192
+# 2       0.25      1
+# 3       0.286     1
+# 4       0.333     1
+# 5       0.5       5
+# 6       0.667     2
+# 7       1        25
+
+#### Might be TRASH______________________________________####
 # Table 1: locus level count per cancer type and locus engager status ####
 # For each locus, how many samples are accessible, engagers and non-engagers, by cancer type
 
@@ -449,7 +512,7 @@ n_engager_loci_per_sample <- pol3_loci_long %>%
 
 # Plot distribution per cancer type
 ggplot(n_engager_loci_per_sample, aes(x = n_engager_loci, fill = cancer_type)) +
-  geom_histogram(bins = 30) +
+  geom_histogram(binwidth = 1, color = "black", linewidth=0.3) +
   facet_wrap(~cancer_type, scales = "free_y") +
   theme_minimal() +
   labs(
@@ -472,18 +535,24 @@ gdc_sample_metadata <- gdc_sample_metadata %>%
   mutate(sample = str_replace(project_id, "TCGA-", "") %>% 
            str_replace("-", "."))
 
-# Join to n_engager_loci_per_sample
-n_engager_loci_per_sample <- n_engager_loci_per_sample %>% 
-  left_join(gdc_sample_metadata %>% select(sample, case_id, sample_id, sample_type),
-            by = "sample")
+# Some samples had more than one BAM file so need to de-dup (e.g. COAD.3, COAD.343, COAD.408 all map to TCGA-AA-A010 because in gdc_sample_metadata that case had 3 BAM files so 3 different atacseq samples mapped to the same tCGA case)
 
-View(n_engager_loci_per_sample)
+
+# Join to n_engager_loci_per_sample
+n_engager_loci_per_sample_final <- n_engager_loci_per_sample %>% 
+  left_join(gdc_sample_metadata %>% dplyr::select(sample, case_id, sample_id, sample_type),
+            by = "sample") %>% 
+  group_by(case_id) %>% 
+  slice_max(n_engager_loci, n=1, with_ties = FALSE) %>% 
+  ungroup
+
+View(n_engager_loci_per_sample_final)
 ```
 
 ## Classify samples into engagers, non-engagers, and baseline based on triphosphatome and atac-seq
 ```{r}
 
-n_engager_loci_per_sample %>% 
+n_engager_loci_per_sample_final %>% 
   filter(cancer_type %in% c("HNSC", "STAD", "KIRC", "BLCA", "KIRP", "BRCA", "COAD")) %>%
   summary()
 
@@ -496,7 +565,7 @@ n_engager_loci_per_sample %>%
  #                                       Max.   :69.00     
 
 
-n_engager_loci_per_sample_candidates <- n_engager_loci_per_sample %>%
+n_engager_loci_per_sample_candidates <- n_engager_loci_per_sample_final %>%
   filter(cancer_type %in% c("HNSC", "STAD", "KIRC", "BLCA", "KIRP", "BRCA", "COAD")) %>%
   group_by(cancer_type) %>%
   mutate(
@@ -543,7 +612,7 @@ n_engager_loci_per_sample_candidates %>%
 n_engager_loci_per_sample_candidates %>%
   count(cancer_type, group) %>%
   pivot_wider(names_from = group, values_from = n) %>%
-  select(cancer_type, engager, non_engager, baseline) %>%
+  dplyr::select(cancer_type, engager, non_engager, baseline) %>%
   mutate(total = engager + non_engager + baseline) %>%
   gt() %>%
   cols_label(
