@@ -382,78 +382,7 @@ per_sample_loci_summary_df %>%
 ```
 
 
-```{r trash}
-#### Might be TRASH______________________________________####
-# Not doing this
-per_sample_gene_summary_df <- pol3_loci_long %>%
-  filter(accessibility == 1) %>%
-  group_by(sample, gene_name) %>%
-  summarise(
-    n_engager_loci = sum(is_5ppp == 1),
-    n_non_engager_loci = sum(is_5ppp == 0),
-    n_total_accessible = n(),
-    pct_engager = n_engager_loci / n_total_accessible,
-    .groups = "drop"
-  ) %>%
-  mutate(cancer_type = str_extract(sample, "^[A-Z]+"))
 
-per_sample_gene_summary_df %>% filter(sample == "COAD.106") %>% count(pct_engager)
-# A tibble: 7 × 2
-#   pct_engager     n
-#         <dbl> <int>
-# 1       0       192
-# 2       0.25      1
-# 3       0.286     1
-# 4       0.333     1
-# 5       0.5       5
-# 6       0.667     2
-# 7       1        25
-
-
-
-# Table 1: locus level count per cancer type and locus engager status ####
-# For each locus, how many samples are accessible, engagers and non-engagers, by cancer type
-
-pol3_loci_long_t1 <-pol3_loci_long %>%
-  group_by(cancer_type, V1, V2, V3, is_5ppp) %>%
-  summarise(
-    n_samples_accessible_at_this_locus = sum(accessibility == 1),
-    n_samples_engagers_at_this_locus = sum(accessibility == 1 & is_5ppp == 1),
-    n_samples_non_engagers_at_this_locus = sum(accessibility == 1 & is_5ppp == 0),
-    n_samples_discrepant_at_this_locus = sum(accessibility == 0 & is_5ppp == 1),
-    .groups = "drop"
-  )
-
-View(pol3_loci_long_t1)
-
-# Table 2 characterizes the triphosphatome landscape across cancer types ####
-# using the lab's BED file (pol3_loci)
-# This table characterizes the triphosphatome landscape across cancer types
-# using the lab's BED file (pol3_loci)
-# - Triphosphatome landscape: how many RIG-I engager (is_5ppp==1) vs 
-#   non-engager (is_5ppp==0) POL III loci are accessible across cancer types
-# - n_total_samples: number of ATAC-seq samples per cancer type in the lab's dataset
-# NOTE: Table 2 filters to accessibility == 1 only
-# Rationale: discrepant samples (is_5ppp == 1 but accessibility == 0) are excluded
-# from downstream methylation analysis (5ppp discrepancy concept)
-# These are loci where RIG-I engagement was determined in HEK293T cells
-# but the locus is not accessible in the TCGA tumor sample
-# Discrepant counts are tracked in table 1 (n_samples_discrepant_at_this_locus)
-# for transparency but not used in downstream analyses
-
-pol3_loci_long_t2 <- pol3_loci_long %>% 
-  filter(accessibility == 1) %>% 
-  group_by(cancer_type) %>% 
-  summarise(
-    n_engager_loci = sum(is_5ppp == 1),
-    n_non_engager_loci = sum(is_5ppp == 0),
-    n_total_samples = n_distinct(sample),
-    .groups = "drop"
-  ) %>% 
-  mutate(pct_engager_loci = n_engager_loci / (n_engager_loci + n_non_engager_loci) * 100)
-
-View(pol3_loci_long_t2)
-```
 
 # Check overlap with TCGA data. Are these loci covered in the TCGA methylation arrays?
 ```{r}
@@ -582,8 +511,7 @@ View(n_engager_loci_per_sample_final)
 
 ## Classify samples into engagers, non-engagers, and baseline based on triphosphatome and atac-seq
 ```{r}
-
-# Tables to categorize the different groups of Pol3 loci ####
+# make DF for type of loci (engager loci, etc) for each sample ####
 per_sample_loci_summary_df <- pol3_loci_long %>% 
   group_by(sample) %>% 
   summarise(
@@ -597,7 +525,7 @@ per_sample_loci_summary_df <- pol3_loci_long %>%
   mutate(pct_accessible_loci_that_are_engager_loci = n_engager_loci/(n_engager_loci + n_non_engager_loci)) #%>% View
 
 
-# Histogram plot the distribution of pct_accessible_loci_that_are_engager_loci
+# Histogram plot the distribution of pct_accessible_loci_that_are_engager_loci ####
 per_sample_loci_summary_df %>%
   mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
   filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
@@ -608,7 +536,7 @@ per_sample_loci_summary_df %>%
   labs(x = "% accessible POL III loci that are RIG-I engagers", y = "N samples") +
   theme(legend.position = "none")
 
-# Violin plot
+# Violin plot ####
 per_sample_loci_summary_df %>%
   mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
   filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
@@ -619,7 +547,7 @@ per_sample_loci_summary_df %>%
   labs(y = "% accessible POL III loci that are RIG-I engagers", x = NULL) +
   theme(legend.position = "none")
 
-# Boxplot
+# Boxplot ####
 per_sample_loci_summary_df %>%
   mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
   filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
@@ -630,7 +558,7 @@ per_sample_loci_summary_df %>%
   labs(y = "% accessible POL III loci that are RIG-I engagers", x = NULL) +
   theme(legend.position = "none")
 
-# number of samples in each quartile
+# number of samples in each quartile ####
 per_sample_loci_summary_df %>%
   mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
   filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
@@ -638,282 +566,51 @@ per_sample_loci_summary_df %>%
   mutate(quartile = ntile(pct_accessible_loci_that_are_engager_loci, 4)) %>%
   count(cancer_type, quartile) %>% View
 
-  ungroup
 
 per_sample_loci_summary_df %>%
   filter(n_engager_loci == 0) %>%
   nrow()
 
-# Trash____________________________
 
-# n_engager_loci_per_sample_final %>% 
-#   filter(cancer_type %in% c("HNSC", "STAD", "KIRC", "BLCA", "KIRP", "BRCA", "COAD")) %>%
-#   summary()
+# Joing to gdc_sample_metadata to get TCGA barcodes to retrieve RNA
 
- #   sample          cancer_type        n_engager_loci    case_id           sample_id         sample_type       
- # Length:167         Length:167         Min.   :17.00   Length:167         Length:167         Length:167        
- # Class :character   Class :character   1st Qu.:33.00   Class :character   Class :character   Class :character  
- # Mode  :character   Mode  :character   Median :38.00   Mode  :character   Mode  :character   Mode  :character  
- #                                       Mean   :40.02                                                           
- #                                       3rd Qu.:46.50                                                           
- #                                       Max.   :69.00     
+candidate_sample_groups <- per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  left_join(gdc_sample_metadata %>% dplyr::select(sample, case_id, sample_id, sample_type),
+            by = "sample") %>% 
+  group_by(case_id) %>% 
+  slice_sample(n=1) %>% 
+  ungroup() %>% 
+  group_by(cancer_type) %>%
+  mutate(quartile = ntile(pct_accessible_loci_that_are_engager_loci, 4),
+         engager_group = case_when(
+           quartile == 4 ~ "engager",
+           quartile == 1 ~ "non_engager",
+           TRUE ~ NA_character_
+         )) %>%
+  ungroup() %>% 
+  filter(!is.na(engager_group)) #%>% View()
+  
 
+# Check if there are more than one sample matching to the same case_id
+candidate_sample_groups %>% 
+  group_by(cancer_type) %>% 
+  count(case_id) %>% 
+  filter(n>1)
 
-# n_engager_loci_per_sample_candidates <- n_engager_loci_per_sample_final %>%
-#   filter(cancer_type %in% c("HNSC", "STAD", "KIRC", "BLCA", "KIRP", "BRCA", "COAD")) %>%
-#   group_by(cancer_type) %>%
-#   mutate(
-#     tertile = ntile(n_engager_loci, 3),
-#     group = case_when(
-#       tertile == 3 ~ "engager",
-#       tertile == 1 ~ "baseline",
-#       tertile == 2 ~ "non_engager"
-#     )
-#   ) %>%
-#   ungroup()
-
-# Check group counts per cancer type
-# n_engager_loci_per_sample_candidates %>%
-#   count(cancer_type, group) %>% View()
-
-# A tibble: 21 × 3
-#    cancer_type group           n
-#    <chr>       <chr>       <int>
-#  1 BLCA        baseline        3
-#  2 BLCA        engager         2
-#  3 BLCA        non_engager     3
-#  4 BRCA        baseline       19
-#  5 BRCA        engager        19
-#  6 BRCA        non_engager    19
-#  7 COAD        baseline       12
-#  8 COAD        engager        12
-#  9 COAD        non_engager    12
-# 10 HNSC        baseline        2
-# 11 HNSC        engager         2
-# 12 HNSC        non_engager     2
-# 13 KIRC        baseline        4
-# 14 KIRC        engager         3
-# 15 KIRC        non_engager     4
-# 16 KIRP        baseline       11
-# 17 KIRP        engager        11
-# 18 KIRP        non_engager    11
-# 19 STAD        baseline        6
-# 20 STAD        engager         5
-# 21 STAD        non_engager     5
+  
 
 
-# Table of groups counts per sample for each cancer type ####
-# n_engager_loci_per_sample_candidates %>%
-#   count(cancer_type, group) %>%
-#   pivot_wider(names_from = group, values_from = n) %>%
-#   dplyr::select(cancer_type, engager, non_engager, baseline) %>%
-#   mutate(total = engager + non_engager + baseline) %>%
-#   gt() %>%
-#   cols_label(
-#     cancer_type = "Cancer type",
-#     engager = "Engager",
-#     non_engager = "Non-engager",
-#     baseline = "Baseline",
-#     total = "Total"
-#   ) %>%
-#   tab_header(title = "RIG-I engager group assignments by cancer type") 
 
 ```
 
-# DE analysis on candidate cancer types with >=3 samples per group
-Note: HNSC has the strongest biological signal but the smallest ATAC-seq sample size in this dataset.
-```{r}
-# Extract raw counts for DEseq ####
-
-candidates <- c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")
-
-counts_list <- list()
-meta_list <- list()
-
-prepare_rnaseq <- function(cancer_type, matched_samples) {
-  message("Processing ", cancer_type)
-  
-  query <- GDCquery(
-    project = paste0("TCGA-", cancer_type),
-    data.category = "Transcriptome Profiling",
-    data.type = "Gene Expression Quantification",
-    workflow.type = "STAR - Counts",
-    sample.type = "Primary Tumor"
-  )
-  
-  se <- GDCprepare(query)
-  
-  # Filter to ATAC-seq matched samples only
-  matched_barcodes <- matched_samples %>%
-    filter(cancer_type == .env$cancer_type) %>%
-    pull(case_id)
-  
-  #se_matched <- se[, se$barcode %in% matched_barcodes]
-  se_matched <- se[, substr(colData(se)$barcode, 1, 12) %in% substr(matched_barcodes, 1, 12)]
-  se_matched <- se_matched[, !duplicated(substr(colData(se_matched)$barcode, 1, 12))]
-  
-  message("  Matched ", ncol(se_matched), " of ", length(matched_barcodes), " samples")
-  
-  list(
-    counts = assay(se_matched, "unstranded"),
-    meta = colData(se_matched) %>%
-      as.data.frame() %>%
-      select(barcode, sample_type) %>%
-      mutate(case_id = substr(barcode, 1, 12)) %>%
-      left_join(
-        matched_samples %>%
-          filter(cancer_type == .env$cancer_type) %>%
-          select(case_id, group, n_engager_loci),
-        by = "case_id"
-      )
-  )
-}
-```
-
-### Try one cancertype fist BRCA
+# Save objects for DE analysis
 ```{r}
 
-brca_rnaseq_data <- prepare_rnaseq("BRCA", n_engager_loci_per_sample_candidates)
+#saveRDS(candidate_sample_groups, "candidate_sample_groups.rds")
+#saveRDS(pol3_loci_long, "pol3_loci_long.rds")
+#saveRDS(pol3_gr, "pol3_gr.rds")
 
-dim(brca_rnaseq_data$counts)
-
-# does meta have group assignments?
-head(brca_rnaseq_data$meta)
-
-# check group distribution
-table(brca_rnaseq_data$meta$group)
-
-# DE analysis for brca #####
-# Create DGEList object
-dge <- DGEList(
-  counts = brca_rnaseq_data$counts,
-  group = brca_rnaseq_data$meta$group
-)
-
-# Filter lowly expressed genes
-keep <- filterByExpr(dge)
-dge <- dge[keep, , keep.lib.sizes = FALSE]
-
-# Normalize
-dge <- calcNormFactors(dge)
-
-# Design matrix - engager vs baseline
-design <- model.matrix(~ 0 + group, data = brca_rnaseq_data$meta)
-colnames(design) <- levels(factor(brca_rnaseq_data$meta$group))
-
-# Estimate dispersion
-dge <- estimateDisp(dge, design)
-
-# Fit model
-fit <- glmQLFit(dge, design)
-
-# Engager vs baseline contrast
-con <- makeContrasts(engager - non_engager, levels = design)
-qlf <- glmQLFTest(fit, contrast = con)
-
-# Results
-de_results_brca_engager_vs_nonengager <- topTags(qlf, n = Inf)$table
-head(de_results_brca_engager_vs_nonengager)
-
-# Strip version numbers from Ensembl IDs
-de_results_brca_engager_vs_nonengager$ensembl_id <- rownames(de_results_brca_engager_vs_nonengager) %>% 
-  str_remove("\\..*")
-
-# Map to gene symbols
-de_results_brca_engager_vs_nonengager$gene_name <- mapIds(
-  org.Hs.eg.db,
-  keys = de_results_brca_engager_vs_nonengager$ensembl_id,
-  column = "SYMBOL",
-  keytype = "ENSEMBL",
-  multiVals = "first"
-)
-
-View(de_results_brca_engager_vs_nonengager)
-
-de_results_brca_engager_vs_nonengager %>%
-  filter(FDR < 0.01, !is.na(gene_name)) %>%
-  nrow()
-# 43 genes FDR < 0.01
-
-de_results_brca_engager_vs_nonengager %>%
-  filter(FDR < 0.01, !is.na(gene_name)) %>%
-  count(direction = ifelse(logFC > 0, "up", "down"))
-#   direction  n
-# 1      down 22
-# 2        up 21
-
-# Sanity check -- are any IFN/innate immune genes in the upregulated set?
-de_results_brca_engager_vs_nonengager %>%
-  filter(FDR < 0.01, !is.na(gene_name), logFC > 0) %>%
-  arrange(FDR) %>%
-  pull(gene_name)
-
-# Check in one gene in this upregulated list has any loci that are "engager loci" 5ppp==1 accessibility == 1 that's in rig-i recognized and pol II transcribed ####
-de_results_brca_engager_vs_nonengager %>%
-  filter(gene_name == "ERVFRD-1") %>%
-  dplyr::select(ensembl_id, logFC, FDR)
-
-# Create GRanges for ERVFRD-1
-ervfrd1_gr <- rowRanges(se_brca)[rowData(se_brca)$gene_name == "ERVFRD-1"]
-ervfrd1_gr
-
-# Create GRanges for engager loci in brca
-# Unique engager loci accessible in at least one BRCA sample
-brca_engager_loci <- pol3_loci_long %>%
-  filter(cancer_type == "BRCA",
-         is_5ppp == 1,
-         accessibility == 1) %>%
-  distinct(V1, V2, V3)
-
-# Create GRanges
-engager_gr_brca <- GRanges(
-  seqnames = brca_engager_loci$V1,
-  ranges = IRanges(
-    start = as.integer(brca_engager_loci$V2),
-    end = as.integer(brca_engager_loci$V3)
-  )
-)
-
-# Creat GRanges for upregulated genes
-up_genes <- de_results_brca_engager_vs_nonengager %>%
-  filter(FDR < 0.01, !is.na(gene_name), logFC > 0) %>%
-  pull(gene_name)
-
-up_gr <- rowRanges(se_brca)[rowData(se_brca)$gene_name %in% up_genes]
-up_gr
-
-# Check overlap with upregulated DE genes
-overlaps_up_engager <- findOverlaps(up_gr, engager_gr_brca)
-names(up_gr)[queryHits(overlaps_up_engager)]
-engager_gr_brca[subjectHits(overlaps_up_engager)]
-
-# Check overlap with POL III loci
-overlaps <- findOverlaps(ervfrd1_gr, pol3_gr)
-overlaps
-
-# # Something's wrong with the barcode format. it's returned 0matched samples
-# # query and prepare for brca
-# query_brca <- GDCquery(
-#   project = "TCGA-BRCA",
-#   data.category = "Transcriptome Profiling",
-#   data.type = "Gene Expression Quantification",
-#   workflow.type = "STAR - Counts",
-#   sample.type = "Primary Tumor"
-# )
-# 
-# se_brca <- GDCprepare(query_brca)
-# head(colData(se_brca)$barcode)
-
-# Check if any upregulated genes have "engager" loci
 ```
-
-# Need to clean up saving necessary objects to pull into another script where i do the de analysis
-```{r}
-# Save objects for DE analysis script ####
-saveRDS(n_engager_loci_per_sample_candidates, "n_engager_loci_per_sample_candidates.rds")
-saveRDS(pol3_loci_long, "pol3_loci_long.rds")
-saveRDS(pol3_loci, "pol3_loci.rds")
-saveRDS(pol3_gr, "pol3_gr.rds")
-```
-
 

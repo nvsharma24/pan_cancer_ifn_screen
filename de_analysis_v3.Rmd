@@ -1,0 +1,244 @@
+---
+title: "de_analysis.Rmd"
+output: html_document
+date: "2026-04-09"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = "hide")
+
+
+```
+
+
+```{r packages}
+if(!require("BiocManager", quietly = T))
+  install.packages("BiocManager")
+
+# Install the necessary bioinformatics packages
+# TCGAbiolinks: for data access
+# GSVA: for the 94-gene signature scoring
+# SummarizedExperiment: the standard data container for TCGA data
+BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+BiocManager::install("sesameData")
+BiocManager::install("sesame")
+BiocManager::install("sesame")
+BiocManager::install("edgeR")
+BiocManager::install("org.Hs.eg.db")
+
+install.packages("nloptr")
+install.packages("ggpubr")
+install.packages("cowplot")
+install.packages("gt")
+install.packages("minifi")
+
+```
+
+
+```{r load packages}
+library(BiocManager)
+library(TCGAbiolinks)
+library(GSVA)
+library(SummarizedExperiment)
+library(tidyverse)
+library(nloptr)
+library(ggpubr)
+library(cowplot)
+library(gt)
+library(webshot2)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(sesameData)
+library(sesame)
+library(edgeR)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+```
+
+```{r read objects}
+
+#candidate_sample_groups <- readRDS("candidate_sample_groups.rds")
+#pol3_loci_long <- readRDS("pol3_loci_long.rds")
+#pol3_gr <- readRDS("pol3_gr.rds")
+
+```
+
+Note: HNSC has the strongest biological signal but the smallest ATAC-seq sample size in this dataset.
+```{r}
+# Extract raw counts for DEseq ####
+
+candidates <- c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")
+
+
+
+prepare_rnaseq <- function(cancer_type, matched_samples) {
+  message("Processing ", cancer_type)
+  
+  query <- GDCquery(
+    project = paste0("TCGA-", cancer_type),
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts",
+    sample.type = "Primary Tumor"
+  )
+  
+  se <- GDCprepare(query)
+  
+  # Filter to ATAC-seq matched samples only
+  matched_barcodes <- matched_samples %>%
+    filter(cancer_type == .env$cancer_type) %>%
+    pull(case_id)
+  
+  #se_matched <- se[, se$barcode %in% matched_barcodes]
+  se_matched <- se[, substr(colData(se)$barcode, 1, 12) %in% substr(matched_barcodes, 1, 12)]
+  se_matched <- se_matched[, !duplicated(substr(colData(se_matched)$barcode, 1, 12))]
+  
+  message("  Matched ", ncol(se_matched), " of ", length(matched_barcodes), " samples")
+  
+  list(
+    counts = assay(se_matched, "unstranded"),
+    se = se_matched,
+    meta = colData(se_matched) %>%
+      as.data.frame() %>%
+      mutate(case_id = substr(barcode, 1, 12)) %>%
+      left_join(
+        matched_samples %>%
+          filter(cancer_type == .env$cancer_type) %>%
+          dplyr::select(case_id, engager_group),
+        by = "case_id"
+      )
+  )
+}
+```
+
+
+# Function for DE analysis
+1) run edgeR engagers vs non_engagers
+2) get up and down genes
+3) Are any up genes in IFN signature genes?
+4) Do up genes have engager loci within them?
+
+Then we can test in BRCA 
+```{r}
+
+run_de_analysis <- function(cancer_type, matched_samples, pol3_loci_long, ifn_genes) {
+  
+  message("Running DE for ", cancer_type)
+  
+  # Prepare RNA-seq data
+  data <- prepare_rnaseq(cancer_type, matched_samples)
+  
+  # 1. EdgeR DE engager vs non_engager ####
+  dge <- DGEList(counts = data$counts, group = data$meta$engager_group)
+  keep <- filterByExpr(dge)
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+  dge <- calcNormFactors(dge)
+  
+  design <- model.matrix(~ 0 + engager_group, data = data$meta)
+  colnames(design) <- levels(factor(data$meta$engager_group))
+  dge <- estimateDisp(dge, design)
+  fit <- glmQLFit(dge, design)
+  
+  con <- makeContrasts(engager - non_engager, levels = design)
+  qlf <- glmQLFTest(fit, contrast = con)
+  
+  results <- topTags(qlf, n = Inf)$table
+  results$ensembl_id <- rownames(results) %>% str_remove("\\..*")
+  results$gene_name <- mapIds(org.Hs.eg.db,
+                              keys = results$ensembl_id,
+                              column = "SYMBOL",
+                              keytype = "ENSEMBL",
+                              multiVals = "first")
+  
+  # 2. Upregulated and downregulated genes ####
+  up_genes <- results %>%
+    filter(FDR < 0.05, !is.na(gene_name), logFC > 0) %>%
+    pull(gene_name)
+  
+  down_genes <- results %>%
+    filter(FDR < 0.05, !is.na(gene_name), logFC < 0) %>%
+    pull(gene_name)
+  
+  # 3. IFN overlap ####
+  ifn_overlap <- intersect(up_genes, ifn_genes)
+  
+  # 4. Engager loci overlap ####
+  engager_loci <- pol3_loci_long %>%
+    filter(cancer_type == .env$cancer_type,
+           is_5ppp == 1,
+           accessibility == 1) %>%
+    distinct(V1, V2, V3)
+  
+  engager_gr <- GRanges(
+    seqnames = engager_loci$V1,
+    ranges = IRanges(start = as.integer(engager_loci$V2),
+                     end = as.integer(engager_loci$V3))
+  )
+  
+  up_gr <- rowRanges(data$se)[rowData(data$se)$gene_name %in% up_genes]
+  overlaps <- findOverlaps(up_gr, engager_gr)
+  genes_with_engager_loci <- names(up_gr)[queryHits(overlaps)]
+  
+  list(
+    de_results = results,
+    up_genes = up_genes,
+    down_genes = down_genes,
+    ifn_overlap = ifn_overlap,
+    genes_with_engager_loci = genes_with_engager_loci,
+    n_samples = nrow(data$meta),
+    n_per_group = table(data$meta$engager_group)
+  )
+}
+
+brca_de <- run_de_analysis("BRCA", candidate_sample_groups, pol3_loci_long, ifn_genes)
+
+# How many DE genes
+length(brca_de$up_genes) #11
+length(brca_de$down_genes) #20
+
+# Any IFN overlap
+brca_de$ifn_overlap
+
+# Any genes with engager loci
+brca_de$genes_with_engager_loci
+
+# Sample counts
+brca_de$n_per_group
+
+# Are there any IFN genes that are even in the expression matrix and were filtered out?
+intersect(ifn_genes, rownames(brca_de$de_results %>% filter(!is.na(gene_name)))) # 0 in expression matrix
+
+
+```
+
+# For all cancer types
+```{r}
+candidates <- c("COAD", "KIRP", "STAD", "KIRC", "BLCA") #"BRCA", 
+
+de_results_all <- lapply(candidates, run_de_analysis,
+                         matched_samples = candidate_sample_groups,
+                         pol3_loci_long = pol3_loci_long,
+                         ifn_genes = ifn_genes)
+names(de_results_all) <- candidates
+
+de_results_all[["BRCA"]] <- brca_de
+
+```
+
+# Dig into DE results for all cancer types
+```{r}
+lapply(names(de_results_all), function(ct) {
+  cat("\n", ct, "\n")
+  cat("N per group:", de_results_all[[ct]]$n_per_group, "\n")
+  cat("N up genes FDR<0.05:", length(de_results_all[[ct]]$up_genes), "\n")
+  cat("N down genes FDR<0.05:", length(de_results_all[[ct]]$down_genes), "\n")
+  cat("IFN overlap:", paste(de_results_all[[ct]]$ifn_overlap, collapse=", "), "\n")
+  cat("Genes with engager loci:", paste(de_results_all[[ct]]$genes_with_engager_loci, collapse=", "), "\n")
+})
+
+de_resul
+```
+
