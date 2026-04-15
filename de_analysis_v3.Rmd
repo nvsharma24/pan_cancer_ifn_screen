@@ -15,8 +15,7 @@ knitr::opts_chunk$set(results = "hide")
 
 
 ```{r packages}
-if(!require("BiocManager", quietly = T))
-  install.packages("BiocManager")
+install.packages("BiocManager")
 
 # Install the necessary bioinformatics packages
 # TCGAbiolinks: for data access
@@ -29,6 +28,10 @@ BiocManager::install("sesame")
 BiocManager::install("sesame")
 BiocManager::install("edgeR")
 BiocManager::install("org.Hs.eg.db")
+BiocManager::install("DESeq2")
+BiocManager::install("apeglm")
+
+BiocManager::install(c("BiocGenerics", "S4Vectors", "IRanges"), force = TRUE, update = TRUE, ask = FALSE)
 
 install.packages("nloptr")
 install.packages("ggpubr")
@@ -56,6 +59,8 @@ library(sesame)
 library(edgeR)
 library(org.Hs.eg.db)
 library(AnnotationDbi)
+library(DeSeq2)
+library(apeglm)
 ```
 
 ```{r read objects}
@@ -239,6 +244,10 @@ lapply(names(de_results_all), function(ct) {
   cat("Genes with engager loci:", paste(de_results_all[[ct]]$genes_with_engager_loci, collapse=", "), "\n")
 })
 
-de_resul
+
+```
+
+```{r}
+
 ```
 

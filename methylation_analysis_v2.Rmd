@@ -434,12 +434,12 @@ probe_gr <- GRanges(
 )
 
 # Find overlaps 
-# 320 overlaps out of 9663 polIII loci -- only 3.3% coverage ugh
-overlaps <- findOverlaps(pol3_gr, probe_gr)
-overlaps 
+# 320 overlaps out of 9663 polIII loci -- only 2.6% coverage 
+methylation_array_atac_seq_overlaps <- findOverlaps(pol3_gr, probe_gr)
+methylation_array_atac_seq_overlaps 
 
 # How many unique POL III loci have coverage
-n_covered <- length(unique(queryHits(overlaps)))
+n_covered <- length(unique(queryHits(methylation_array_atac_seq_overlaps)))
 n_total <- length(pol3_gr)
 cat("Covered loci:", n_covered, "out of", n_total, "(", round(n_covered/n_total*100, 1), "%)\n")
 
