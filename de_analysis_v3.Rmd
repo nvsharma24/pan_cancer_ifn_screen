@@ -29,15 +29,46 @@ BiocManager::install("sesame")
 BiocManager::install("edgeR")
 BiocManager::install("org.Hs.eg.db")
 BiocManager::install("DESeq2")
-BiocManager::install("apeglm")
+BiocManager::install("apeglm", update = FALSE, ask = FALSE)
 
 BiocManager::install(c("BiocGenerics", "S4Vectors", "IRanges"), force = TRUE, update = TRUE, ask = FALSE)
+BiocManager::install("DESeq2", force=TRUE, update = FALSE, ask = FALSE)
 
 install.packages("nloptr")
 install.packages("ggpubr")
 install.packages("cowplot")
 install.packages("gt")
 install.packages("minifi")
+
+# 4/15/26 trying to get DESeq2
+# 1. Remove the mismatched packages from your local Linux library
+remove.packages(c("BiocGenerics", "S4Vectors", "IRanges"))
+
+# 2. Force BiocManager to use the correct repository for R 4.3
+BiocManager::install(version = "3.18", ask = FALSE)
+
+# 3. Install DESeq2 cleanly from the 3.18 repository
+BiocManager::install("DESeq2", update = FALSE, ask = FALSE)
+
+BiocManager::install(c("BiocGenerics", "IRanges", "S4Vectors", "DESeq2"), update = FALSE, ask = FALSE)
+
+# 1. Delete the corrupted phantom folder directly from the file system
+unlink("/home/nvsharm/R/x86_64-pc-linux-gnu-library/4.3/S4Vectors", recursive = TRUE)
+
+# 2. Install S4Vectors by pointing explicitly to the Bioconductor 3.18 repository
+install.packages("S4Vectors", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+install.packages("IRanges", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+# 3. Test DESeq2
+library(DESeq2)
+
+
+
+
+# Install clusterProfiler and msigdbr
+BiocManager::install("clusterProfiler")
+install.packages("msigdbr")
 
 ```
 
@@ -59,8 +90,12 @@ library(sesame)
 library(edgeR)
 library(org.Hs.eg.db)
 library(AnnotationDbi)
-library(DeSeq2)
+library(S4Vectors)
+library(IRanges)
+library(DESeq2)
 library(apeglm)
+library(clusterProfiler)
+library(msigdbr)
 ```
 
 ```{r read objects}
@@ -71,9 +106,10 @@ library(apeglm)
 
 ```
 
+# Extract raw counts for de analysis
 Note: HNSC has the strongest biological signal but the smallest ATAC-seq sample size in this dataset.
 ```{r}
-# Extract raw counts for DEseq ####
+
 
 candidates <- c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")
 
@@ -119,16 +155,78 @@ prepare_rnaseq <- function(cancer_type, matched_samples) {
 }
 ```
 
+```{r}
 
-# Function for DE analysis
+prepare_and_cache_rnaseq <- function(cancer_type, matched_samples, cache_dir = "tcga_cache") {
+  
+  # 1. Setup cache directory
+  if(!dir.exists(cache_dir)) dir.create(cache_dir)
+  cache_file <- file.path(cache_dir, paste0(cancer_type, "_rnaseq_matched.rds"))
+  
+  # 2. Check for cached data
+  if(file.exists(cache_file)) {
+    message("\n>>> Loading CACHED RNA-seq data for ", cancer_type)
+    return(readRDS(cache_file))
+  }
+  
+  # 3. If no cache, perform the download and processing
+  message("\n>>> Downloading NEW RNA-seq data for ", cancer_type)
+  
+  query <- GDCquery(
+    project = paste0("TCGA-", cancer_type),
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts",
+    sample.type = "Primary Tumor"
+  )
+  
+  GDCdownload(query = query)
+  se <- GDCprepare(query)
+  
+  # Filter to ATAC-seq matched samples
+  matched_barcodes <- matched_samples %>%
+    filter(cancer_type == .env$cancer_type) %>%
+    pull(case_id)
+  
+  se_matched <- se[, substr(colData(se)$barcode, 1, 12) %in% substr(matched_barcodes, 1, 12)]
+  se_matched <- se_matched[, !duplicated(substr(colData(se_matched)$barcode, 1, 12))]
+  
+  message("  Matched ", ncol(se_matched), " of ", length(matched_barcodes), " samples")
+  
+  # Compile the final object
+  final_data <- list(
+    counts = assay(se_matched, "unstranded"),
+    se = se_matched,
+    meta = colData(se_matched) %>%
+      as.data.frame() %>%
+      mutate(case_id = substr(barcode, 1, 12)) %>%
+      left_join(
+        matched_samples %>%
+          filter(cancer_type == .env$cancer_type) %>%
+          dplyr::select(case_id, engager_group),
+        by = "case_id"
+      )
+  )
+  
+  # 4. Save to cache
+  saveRDS(final_data, cache_file)
+  message("  Saved to cache: ", cache_file)
+  
+  return(final_data)
+}
+
+```
+
+
+# Functions for DE analysis
 1) run edgeR engagers vs non_engagers
 2) get up and down genes
 3) Are any up genes in IFN signature genes?
 4) Do up genes have engager loci within them?
 
 Then we can test in BRCA 
+## edgeR
 ```{r}
-
 run_de_analysis <- function(cancer_type, matched_samples, pol3_loci_long, ifn_genes) {
   
   message("Running DE for ", cancer_type)
@@ -197,7 +295,10 @@ run_de_analysis <- function(cancer_type, matched_samples, pol3_loci_long, ifn_ge
     n_per_group = table(data$meta$engager_group)
   )
 }
+```
 
+### For one cancer type
+```{r}
 brca_de <- run_de_analysis("BRCA", candidate_sample_groups, pol3_loci_long, ifn_genes)
 
 # How many DE genes
@@ -219,7 +320,7 @@ intersect(ifn_genes, rownames(brca_de$de_results %>% filter(!is.na(gene_name))))
 
 ```
 
-# For all cancer types
+### For all cancer types
 ```{r}
 candidates <- c("COAD", "KIRP", "STAD", "KIRC", "BLCA") #"BRCA", 
 
@@ -231,9 +332,15 @@ names(de_results_all) <- candidates
 
 de_results_all[["BRCA"]] <- brca_de
 
+# Rename in active environment b/c doing DESeq2 also
+#de_results_all_edgeR <- de_results_all
+
+# Save object to disk
+#saveRDS(de_results_all_edgeR, "de_results_all_edgeR.rds")
+
 ```
 
-# Dig into DE results for all cancer types
+### Dig into DE results for all cancer types
 ```{r}
 lapply(names(de_results_all), function(ct) {
   cat("\n", ct, "\n")
@@ -247,7 +354,244 @@ lapply(names(de_results_all), function(ct) {
 
 ```
 
+## DESeq2
+### Module 1 Core DESeq2 Function
 ```{r}
+
+# Function handles matrix setup, variance stabilization, and DE testing 
+# returns a list containing the raw dds object, the full results df, and intersection logic
+run_deseq2_core <- function(cancer_type, matched_samples, pol3_loci_long, ifn_genes) {
+  
+  message("\n>>> Running DESeq2 Core for ", cancer_type)
+  data <- prepare_and_cache_rnaseq(cancer_type, matched_samples)
+  
+  # Ensure reference level
+  data$meta$engager_group <- factor(data$meta$engager_group, levels = c("non_engager", "engager"))
+  
+  dds <- DESeqDataSetFromMatrix(countData = data$counts,
+                                colData = data$meta,
+                                design = ~ engager_group)
+  
+  keep <- rowSums(counts(dds)) >= 10
+  dds <- dds[keep,]
+  dds <- DESeq(dds)
+  res <- lfcShrink(dds, coef="engager_group_engager_vs_non_engager", type="apeglm")
+  
+  res_df <- as.data.frame(res)
+  res_df$ensembl_id <- rownames(res_df) %>% str_remove("\\..*")
+  res_df$gene_name <- mapIds(org.Hs.eg.db,
+                             keys = res_df$ensembl_id,
+                             column = "SYMBOL",
+                             keytype = "ENSEMBL",
+                             multiVals = "first")
+  
+  up_genes <- res_df %>% filter(padj < 0.05, !is.na(gene_name), log2FoldChange > 0.5) %>% pull(gene_name)
+  down_genes <- res_df %>% filter(padj < 0.05, !is.na(gene_name), log2FoldChange < -0.5) %>% pull(gene_name)
+  
+  # Engager loci overlap logic
+  engager_loci <- pol3_loci_long %>%
+    filter(cancer_type == .env$cancer_type, is_5ppp == 1, accessibility == 1) %>%
+    distinct(V1, V2, V3)
+  
+  engager_gr <- GRanges(seqnames = engager_loci$V1, ranges = IRanges(start = as.integer(engager_loci$V2), end = as.integer(engager_loci$V3)))
+  up_gr <- rowRanges(data$se)[rowData(data$se)$gene_name %in% up_genes]
+  overlaps <- findOverlaps(up_gr, engager_gr)
+  genes_with_engager_loci <- names(up_gr)[queryHits(overlaps)]
+  
+  return(list(
+    cancer_type = cancer_type,
+    dds = dds,
+    res_df = res_df,
+    up_genes = up_genes,
+    down_genes = down_genes,
+    ifn_overlap = intersect(up_genes, ifn_genes),
+    genes_with_engager_loci = genes_with_engager_loci,
+    n_samples = nrow(data$meta),
+    n_per_group = table(data$meta$engager_group)
+  ))
+}
+
+```
+
+
+
+
+### Module 2 QC Plotting
+```{r}
+generate_deseq_qc_plots <- function(deseq_output) {
+  ct <- deseq_output$cancer_type
+  dds <- deseq_output$dds
+  
+  dir.create("DESeq_QC_Plots", showWarnings = FALSE)
+  
+  # Dispersion Plot
+  png(paste0("DESeq_QC_Plots/", ct, "_dispersion.png"), width=600, height=500)
+  plotDispEsts(dds, main=paste(ct, "Dispersion Estimates"))
+  dev.off()
+  
+  # PCA Plot
+  vsd <- vst(dds, blind=FALSE)
+  pca_data <- plotPCA(vsd, intgroup="engager_group", returnData=TRUE)
+  percentVar <- round(100 * attr(pca_data, "percentVar"))
+  
+  pca_plot <- ggplot(pca_data, aes(PC1, PC2, color=engager_group)) +
+    geom_point(size=3, alpha=0.8) +
+    theme_minimal() +
+    labs(title=paste(ct, "PCA"),
+         x=paste0("PC1: ", percentVar[1], "%"),
+         y=paste0("PC2: ", percentVar[2], "%")) +
+    scale_color_manual(values=c("non_engager"="#00BFC4", "engager"="#F8766D"))
+  
+  ggsave(paste0("DESeq_QC_Plots/", ct, "_PCA.png"), plot=pca_plot, width=5, height=4)
+  message("Saved QC plots for ", ct)
+}
+```
+
+
+### Module 3 GSVA sample-by-sample scoring
+```{r}
+calculate_sample_scores <- function(deseq_output, custom_index = NULL) {
+  
+  # Default to the cancer-specific up_genes if no index is provided
+  if(is.null(custom_index)) {
+    custom_index <- deseq_output$up_genes
+  }
+  
+  if(length(custom_index) == 0) {
+    message("No index genes available for ", deseq_output$cancer_type)
+    return(NULL)
+  }
+  
+  # Extract VST normalized counts
+  vsd <- vst(deseq_output$dds, blind=FALSE)
+  vst_mat <- assay(vsd)
+  
+  # Map rownames from Ensembl to Symbol for GSVA matching
+  rownames(vst_mat) <- deseq_output$res_df$gene_name[match(rownames(vst_mat), rownames(deseq_output$res_df))]
+  vst_mat <- vst_mat[!is.na(rownames(vst_mat)), ] # Drop any genes that didn't map correctly to a symbol (NAs)
+  
+  # Put the up genes (for brca = 133 up genes) into a list format for GSVA package
+  index_list <- list(Target_Index = custom_index)
+  
+  # run GSVA to get one score per column (per sample)
+  gsva_res <- gsva(expr = vst_mat, gset.idx.list = index_list, method = "gsva", verbose = FALSE)
+  
+  # format into a table that can be used to make a boxplot
+  sample_scores <- data.frame(
+    case_id = colnames(vst_mat),
+    custom_metric = as.numeric(gsva_res["Target_Index", ]),
+    group = deseq_output$dds$engager_group
+  )
+  
+  return(sample_scores)
+}
+```
+
+### BRCA 
+```{r}
+#### Module 1_____ ####
+brca_deseq2_test <- run_deseq2_core("BRCA", candidate_sample_groups, pol3_loci_long, ifn_genes)
+brca_deseq2_test$n_per_group
+# non_engager     engager 
+#          15          14
+length(brca_deseq2_test$up_genes)
+# [1] 169
+brca_deseq2_test$res_df %>% View
+
+
+#### Module 2______ ####
+# Generate the PCA and Dispersion plots
+generate_deseq_qc_plots(brca_deseq2_test)
+
+
+#### Module 3______ ####
+# Generate the custom sample-by-sample metric
+brca_gsva_scores <- calculate_sample_scores(brca_deseq2_test)
+
+# Visualize the custom 133 gene score
+group_colors <- c("non_engager" = "#4575b4", "engager" = "#d73027")
+
+ggplot(brca_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
+  # Create the boxplot with a bit of transparency
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  # Add the sample points (dots) and color them by group
+  geom_jitter(aes(color = group), width = 0.2, size = 2.5, alpha = 0.8) +
+  # Use a clean, professional theme
+  theme_minimal() +
+  # Map the colors we defined
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  # Refine labels and titles
+  labs(
+    title = "BRCA: Sample-Level Gene Set Scoring",
+    subtitle = paste0("Based on ", length(brca_deseq2_test$up_genes), "-gene Signature"),
+    y = "GSVA Enrichment Score",
+    x = NULL # Removing 'group' label as the axis categories make it obvious
+  ) +
+  # Remove the legend since the x-axis already labels the groups
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11, color = "black"),
+    panel.grid.minor = element_blank()
+  ) +
+  stat_compare_means(method = "wilcox.test", label.x = 1.5, label.y = 0.6)
+
+
+
+
+ggplot(brca_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2) +
+  theme_minimal() +
+  labs(title = "BRCA: Sample-by-Sample Custom Metric (133-Gene Index)", y = "GSVA Score")
+
+
+#### biological proof: enrichment of immunostimulatory pathways______ ####
+# 2. Pull the Hallmark Interferon Alpha list
+# ifn_alpha <- msigdbr(species = "human", category = "H") %>% 
+#   filter(gs_name == "HALLMARK_INTERFERON_ALPHA_RESPONSE") %>% 
+#   pull(gene_symbol)
+
+# 2. See which of 33 genes overlap with ifn_genes
+brca_deseq2_ifn_overlap <- intersect(brca_deseq2_test$up_genes, ifn_genes)
+
+# 3. Check the results
+print(paste("Number of overlapping IFN genes:", length(brca_deseq2_ifn_overlap)))
+print(brca_deseq2_ifn_overlap)
+
+# Check overlap with edgeR genes
+intersect(brca_deseq2_test$up_genes, brca_de$up_genes)
+
+```
+
+### COAD 
+```{r}
+#### Module 1 ####
+coad_deseq2_test <- run_deseq2_core("COAD", candidate_sample_groups, pol3_loci_long, ifn_genes)
+brca_deseq2_test$n_per_group
+# non_engager     engager 
+#          15          14
+length(coad_deseq2_test$up_genes)
+# [1] 169
+coad_deseq2_test$res_df %>% View
+
+
+#### Module 2 ####
+# Generate the PCA and Dispersion plots
+generate_deseq_qc_plots(coad_deseq2_test)
+
+
+#### Module 3 ####
+# Generate the custom sample-by-sample metric
+coad_gsva_scores <- calculate_sample_scores(coad_deseq2_test)
+
+# Visualize the custom metric
+ggplot(coad_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2) +
+  theme_minimal() +
+  labs(title = "COAD: Sample-by-Sample Custom Metric (133-Gene Index)", y = "GSVA Score")
 
 ```
 
