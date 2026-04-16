@@ -39,6 +39,7 @@ install.packages("ggpubr")
 install.packages("cowplot")
 install.packages("gt")
 install.packages("minifi")
+install.packages("glmnet")
 
 # 4/15/26 trying to get DESeq2
 # 1. Remove the mismatched packages from your local Linux library
@@ -96,6 +97,7 @@ library(DESeq2)
 library(apeglm)
 library(clusterProfiler)
 library(msigdbr)
+library(glmnet)
 ```
 
 ```{r read objects}
@@ -1222,5 +1224,164 @@ ggplot(blca_core_scores, aes(x = group, y = custom_metric, fill = group)) +
   labs(title = "BLCA: 11-Gene Core Signature", y = "GSVA Enrichment Score", x = NULL) +
   theme(legend.position = "none", plot.title = element_text(face = "bold")) +
   stat_compare_means(method = "wilcox.test", label.x = 1.5)
+```
+
+# Predictive signature model training
+## BRCA
+```{r}
+brca_data_counts <- prepare_and_cache_rnaseq("BRCA", candidate_sample_groups)
+
+names(brca_data_counts)
+dim(brca_data_counts$counts)
+length(brca_deseq2_test$up_genes)
+
+brca_vst_mat <- vst(brca_deseq2_test$dds, blind = TRUE)
+brca_vst_counts <- assay(brca_vst_mat)
+dim(brca_vst_counts)
+# [1] 39234    29
+
+# brca_vst_133 <- brca_vst_counts %>%
+#   as.data.frame() %>%
+#   rownames_to_column("gene_name") %>%
+#   filter(gene_name %in% brca_deseq2_test$up_genes) %>%
+#   column_to_rownames("gene_name")
+
+
+
+# 1. Map the Ensembl IDs in brca_vst_counts to Symbols using your existing res_df
+# Using match ensures the order remains identical to the matrix columns
+gene_symbols <- brca_deseq2_test$res_df$gene_name[match(rownames(brca_vst_counts), rownames(brca_deseq2_test$res_df))]
+rownames(brca_vst_counts) <- gene_symbols
+
+
+# 2. Subset to the 133 genes (now that names match) and clean NAs
+brca_vst_133 <- brca_vst_counts[rownames(brca_vst_counts) %in% brca_deseq2_test$up_genes, ]
+brca_vst_133 <- brca_vst_133[!is.na(rownames(brca_vst_133)), ]
+dim(brca_vst_133)
+
+# Align Labels and Run LOOCV______####
+
+# 3. Setup labels (Engager = 1, Non-Engager = 0) 
+# colData is already aligned to the matrix columns
+y <- ifelse(colData(brca_deseq2_test$dds)$engager_group == "engager", 1, 0)
+X <- t(brca_vst_133) # glmnet requires samples as rows
+n_samples <- nrow(X)
+predicted_probs <- numeric(n_samples)
+
+# 4. LOOCV Loop for 133 genes____####
+set.seed(42) # For reproducibility in cv.glmnet folds
+for(i in 1:n_samples) {
+  X_train <- X[-i, ]
+  y_train <- y[-i]
+  X_test  <- X[i, , drop = FALSE]
+  
+  # alpha=1 for LASSO; binomial for logistic
+  # Using 5 folds for internal CV because training N is small (28)
+  cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
+  
+  # Predict probability for the held-out sample
+  predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
+}
+
+# Evaluation and Plotting_____####
+
+library(pROC)
+auc_val <- as.numeric(auc(roc(y, predicted_probs, quiet = TRUE)))
+cor_val <- cor(predicted_probs, y)
+
+results_df <- data.frame(
+  true_label = factor(y, labels = c("Non-Engager", "Engager")),
+  pred_prob = predicted_probs
+)
+
+ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
+  geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
+  theme_minimal() +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(
+    title = paste0("BRCA LOOCV: 133-Gene Signature (AUC = ", round(auc_val, 3), ")"),
+    subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
+    y = "Predicted Probability of Engagement",
+    x = NULL
+  ) +
+  theme(legend.position = "none", plot.title = element_text(face = "bold")) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
+
+
+# LOOCV Loop for Core 11 Genes____####
+
+# 1. Define the 11-gene subset from your counts
+# (Ensures rownames are already symbols from previous step)
+brca_vst_11 <- brca_vst_counts[rownames(brca_vst_counts) %in% core_11_genes, ]
+brca_vst_11 <- brca_vst_11[!is.na(rownames(brca_vst_11)), ]
+
+# 2. Setup training data
+X_11 <- t(brca_vst_11) 
+y <- ifelse(colData(brca_deseq2_test$dds)$engager_group == "engager", 1, 0)
+n_samples <- nrow(X_11)
+predicted_probs_11 <- numeric(n_samples)
+
+# 3. The LOOCV Loop
+set.seed(42) 
+for(i in 1:n_samples) {
+  # Hide one, train on the rest
+  X_train <- X_11[-i, ]
+  y_train <- y[-i]
+  X_test  <- X_11[i, , drop = FALSE]
+  
+  # Lasso Logistic Regression
+  # nfolds=5 for internal stability in the small training set
+  cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
+  
+  # Get the "Confidence Score" for the held-out sample
+  predicted_probs_11[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
+}
+
+# 4. Calculate Final Stats
+library(pROC)
+auc_11 <- as.numeric(auc(roc(y, predicted_probs_11, quiet = TRUE)))
+cor_11 <- cor(predicted_probs_11, y)
+
+# 5. Format and Plot
+results_11_df <- data.frame(
+  true_label = factor(y, labels = c("Non-Engager", "Engager")),
+  pred_prob = predicted_probs_11
+)
+
+ggplot(results_11_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
+  geom_jitter(aes(color = true_label), width = 0.2, size = 3) +
+  theme_minimal() +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(
+    title = paste0("BRCA LOOCV: Core 11-Gene Signature (AUC = ", round(auc_11, 3), ")"),
+    subtitle = paste0("Pearson Correlation: ", round(cor_11, 3)),
+    y = "Predicted Probability of Engagement",
+    x = NULL
+  ) +
+  theme(
+    legend.position = "none", 
+    plot.title = element_text(face = "bold", size = 14)
+  ) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
+
+# Extract coefficients at the optimal lambda (lambda.min)
+# This returns a sparse matrix of all genes and their weights
+weights_matrix <- coef(cv_fit, s = "lambda.min")
+
+# Convert to a standard data frame and filter for non-zero weights
+# (LASSO forces unimportant genes to 0)
+gene_weights <- data.frame(
+  gene = rownames(weights_matrix),
+  weight = as.numeric(weights_matrix)
+) %>%
+  filter(weight != 0) %>%
+  arrange(desc(abs(weight)))
+
+# View the result
+print(gene_weights)
 ```
 
