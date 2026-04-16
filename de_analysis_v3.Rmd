@@ -653,7 +653,7 @@ generate_deseq_qc_plots(coad_deseq2_test)
 # Generate the custom sample-by-sample metric
 coad_gsva_scores <- calculate_sample_scores(coad_deseq2_test)
 
-# Visualize the custom metric
+
 # Visualize the custom 133 gene score
 group_colors <- c("non_engager" = "#4575b4", "engager" = "#d73027")
 
@@ -820,9 +820,12 @@ plot_grid(p_brca_core, p_coad_core, ncol = 2)
 #### Module 1 ####
 kirp_deseq2_test <- run_deseq2_core("KIRP", candidate_sample_groups, pol3_loci_long, ifn_genes)
 kirp_deseq2_test$n_per_group
+# non_engager     engager 
+#           9           8 
+
 # Check how many genes passed the filter
 length(kirp_deseq2_test$up_genes)
-
+# 12
 
 #### Module 2 ####
 # Generate the PCA and Dispersion plots
@@ -934,3 +937,128 @@ ggplot(kirp_core_scores, aes(x = group, y = custom_metric, fill = group)) +
   ) +
   theme(legend.position = "none", plot.title = element_text(face = "bold")) +
   stat_compare_means(method = "wilcox.test", label.x = 1.5)
+```
+
+
+### STAD
+```{r}
+#### Module 1 ####
+stad_deseq2_test <- run_deseq2_core("STAD", candidate_sample_groups, pol3_loci_long, ifn_genes)
+stad_deseq2_test$n_per_group
+
+# Check how many genes passed the filter
+length(stad_deseq2_test$up_genes)
+
+
+#### Module 2 ####
+# Generate the PCA and Dispersion plots
+generate_deseq_qc_plots(stad_deseq2_test)
+
+
+#### Module 3 ####
+# Generate the custom sample-by-sample metric
+stad_gsva_scores <- calculate_sample_scores(stad_deseq2_test)
+
+# Visualize the custom metric
+ggplot(stad_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  geom_jitter(aes(color = group), width = 0.2, size = 2.5, alpha = 0.8) +
+  theme_minimal() +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(
+    title = "STAD: Sample-Level Gene Set Scoring",
+    subtitle = paste0("Based on ", length(stad_deseq2_test$up_genes), "-gene Signature"),
+    y = "GSVA Enrichment Score",
+    x = NULL 
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11, color = "black"),
+    panel.grid.minor = element_blank()
+  ) +
+  stat_compare_means(method = "wilcox.test", label.x = 1.5, label.y = 0.6)
+
+
+#### MSigDB interrogation of immune pathways______####
+# 1. Extract VST normalized counts and convert Ensembl IDs to Gene Symbols
+vst_stad <- vst(stad_deseq2_test$dds, blind=FALSE)
+stad_vst_mat <- assay(vst_stad)
+rownames(stad_vst_mat) <- stad_deseq2_test$res_df$gene_name[match(rownames(stad_vst_mat), rownames(stad_deseq2_test$res_df))]
+stad_vst_mat <- stad_vst_mat[!is.na(rownames(stad_vst_mat)), ]
+
+# 2. Score the STAD samples against ONLY these immune pathways
+# (Relies on target_pathways list defined in the BRCA chunk)
+stad_immune_gsva <- gsva(expr = stad_vst_mat, 
+                         gset.idx.list = target_pathways, 
+                         method = "gsva", 
+                         verbose = FALSE)
+
+# 3. Format all three pathways into a dataframe
+stad_immune_scores <- data.frame(
+  case_id = colnames(stad_vst_mat),
+  ifn_alpha = as.numeric(stad_immune_gsva["ifn_alpha", ]),
+  ifn_gamma = as.numeric(stad_immune_gsva["ifn_gamma", ]),
+  inflammatory = as.numeric(stad_immune_gsva["inflammatory", ]),
+  group = stad_deseq2_test$dds$engager_group
+)
+
+# Reshape data for ggplot faceting
+stad_immune_long <- stad_immune_scores %>%
+  pivot_longer(cols = c(ifn_alpha, ifn_gamma, inflammatory),
+               names_to = "pathway",
+               values_to = "score")
+
+# 4. Plot all three pathways side-by-side with a shared y-axis
+ggplot(stad_immune_long, aes(x = group, y = score, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  geom_jitter(aes(color = group), width = 0.2, size = 2, alpha = 0.8) +
+  facet_wrap(~ pathway) +
+  theme_minimal() +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(
+    title = "STAD: Targeted Immune Pathway GSVA Scores", 
+    y = "GSVA Enrichment Score", 
+    x = NULL
+  ) +
+  theme(
+    legend.position = "none", 
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11, color = "black"),
+    strip.text = element_text(size = 12, face = "bold"),
+    panel.grid.minor = element_blank()
+  ) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.3)
+
+
+#### Is there overlap of up genes with other cancertypes?____####
+stad_deseq2_ifn_overlap <- intersect(stad_deseq2_test$up_genes, ifn_genes)
+
+print(paste("Number of overlapping IFN genes:", length(stad_deseq2_ifn_overlap)))
+print(stad_deseq2_ifn_overlap)
+
+# Check overlap with brca up genes  
+intersect(stad_deseq2_test$up_genes, brca_deseq2_test$up_genes)
+
+
+#### Check if the 11 genes identified by edgeR in BRCA score high here ____####
+# (Relies on core_11_genes vector defined in previous chunks)
+stad_core_scores <- calculate_sample_scores(stad_deseq2_test, custom_index = core_11_genes)
+
+ggplot(stad_core_scores, aes(x = group, y = custom_metric, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  geom_jitter(aes(color = group), width = 0.2, size = 2.5, alpha = 0.8) +
+  theme_minimal() +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(
+    title = "STAD: 11-Gene Core Signature", 
+    y = "GSVA Enrichment Score", 
+    x = NULL
+  ) +
+  theme(legend.position = "none", plot.title = element_text(face = "bold")) +
+  stat_compare_means(method = "wilcox.test", label.x = 1.5)
+```
+
