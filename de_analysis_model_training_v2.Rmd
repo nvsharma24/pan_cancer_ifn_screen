@@ -1441,7 +1441,7 @@ dim(brca_vst_133)
 y <- ifelse(colData(brca_deseq2_test$dds)$engager_group == "engager", 1, 0)
 X <- t(brca_vst_133) # glmnet requires samples as rows
 n_samples <- nrow(X)
-predicted_probs <- numeric(n_samples)
+brca_predicted_probs <- numeric(n_samples)
 
 # LOOCV Loop for 133 genes____####
 set.seed(42) # For reproducibility in cv.glmnet folds
@@ -1455,35 +1455,82 @@ for(i in 1:n_samples) {
   cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
   
   # Predict probability for the held-out sample
-  predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
+  brca_predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
 }
 
 # Evaluation and Plotting_____####
 
 library(pROC)
-auc_val <- as.numeric(auc(roc(y, predicted_probs, quiet = TRUE)))
-cor_val <- cor(predicted_probs, y)
+auc_val <- as.numeric(auc(roc(y, brca_predicted_probs, quiet = TRUE)))
+cor_val <- cor(brca_predicted_probs, y)
 
+# Redo plots by redefining results_df first!!!!!!!!!
 results_df <- data.frame(
   true_label = factor(y, labels = c("Non-Engager", "Engager")),
-  pred_prob = predicted_probs
+  pred_prob = brca_predicted_probs
 )
 
+# results_df <- data.frame(
+#   true_label = factor(y, levels = c(0, 1), labels = c("Non-Engager", "Engager")), 
+#   pred_prob = brca_predicted_probs
+# )
+
+
+# 2. Map colors directly by position: 1st level (Non-Engager) = blue, 2nd level (Engager) = red
 ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
   geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
   theme_minimal() +
-  scale_fill_manual(values = group_colors) +
-  scale_color_manual(values = group_colors) +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_color_manual(values = c("blue", "red")) +
   labs(
     title = paste0("BRCA LOOCV: 133-Gene Signature (AUC = ", round(auc_val, 3), ")"),
     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
-    y = "Predicted Probability of Engagement",
+    y = "Predicted Probability of Engager Status",
     x = NULL
   ) +
   theme(legend.position = "none", plot.title = element_text(face = "bold")) +
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
+# ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
+#   geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
+#   geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
+#   theme_minimal() +
+#   scale_fill_manual(values = group_colors) +
+#   scale_color_manual(values = group_colors) +
+#   labs(
+#     title = paste0("BRCA LOOCV: 133-Gene Signature (AUC = ", round(auc_val, 3), ")"),
+#     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
+#     y = "Predicted Probability of Engager Status",
+#     x = NULL
+#   ) +
+#   theme(legend.position = "none", plot.title = element_text(face = "bold")) +
+#   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
+
+# AUC Plot
+# Calculate the ROC object
+# Ensures "Engager" is treated as the positive class
+roc_obj <- roc(results_df$true_label, results_df$pred_prob, levels = c("Non-Engager", "Engager"))
+
+# Extract coordinates for ggplot
+roc_data <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+# Generate the ROC plot
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  #geom_line(color = "red", size = 1) +
+  geom_path(color = "red", size = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  theme_minimal() +
+  labs(
+    title = "ROC Curve: BRCA LOOCV 133-Gene Signature",
+    subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
+  ) +
+  theme(plot.title = element_text(face = "bold"))
 
 # LOOCV Loop for Core 11 Genes____####
 
@@ -1593,7 +1640,7 @@ dim(coad_vst)
 y <- ifelse(colData(coad_deseq2_test$dds)$engager_group == "engager", 1, 0)
 X <- t(coad_vst) # glmnet requires samples as rows
 n_samples <- nrow(X)
-predicted_probs <- numeric(n_samples)
+coad_predicted_probs <- numeric(n_samples)
 
 # LOOCV Loop for 26 genes____####
 set.seed(42) # For reproducibility in cv.glmnet folds
@@ -1607,18 +1654,18 @@ for(i in 1:n_samples) {
   cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
   
   # Predict probability for the held-out sample
-  predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
+  coad_predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
 }
 
 # Evaluation and Plotting_____####
 
 library(pROC)
-auc_val <- as.numeric(auc(roc(y, predicted_probs, quiet = TRUE)))
-cor_val <- cor(predicted_probs, y)
+auc_val <- as.numeric(auc(roc(y, coad_predicted_probs, quiet = TRUE)))
+cor_val <- cor(coad_predicted_probs, y)
 
 results_df <- data.frame(
   true_label = factor(y, labels = c("Non-Engager", "Engager")),
-  pred_prob = predicted_probs
+  pred_prob = coad_predicted_probs
 )
 
 ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
@@ -1630,12 +1677,36 @@ ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
   labs(
     title = paste0("COAD LOOCV: 26-Gene Signature (AUC = ", round(auc_val, 3), ")"),
     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
-    y = "Predicted Probability of Engagement",
+    y = "Predicted Probability of Engager Status",
     x = NULL
   ) +
   theme(legend.position = "none", plot.title = element_text(face = "bold")) +
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
+# AUC Plot
+# Calculate the ROC object
+# Ensures "Engager" is treated as the positive class
+roc_obj <- roc(results_df$true_label, results_df$pred_prob, levels = c("Non-Engager", "Engager"))
+
+# Extract coordinates for ggplot
+roc_data <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+# Generate the ROC plot
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  #geom_line(color = "red", size = 1) +
+  geom_path(color = "red", size = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  theme_minimal() +
+  labs(
+    title = "ROC Curve: COAD LOOCV 26 Gene Signature",
+    subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
+  ) +
+  theme(plot.title = element_text(face = "bold"))
 
 ```
 
@@ -2058,30 +2129,234 @@ summary(brca_cox_model)
 # Score (logrank) test = 107.4  on 12 df,   p=<2e-16
 
 # Add subtype and hormone receptor status as covariates ####
-
+# Subtypes_____________________
 # Look for the right columns
 TCGAquery_subtype(tumor = "brca") %>% View()
   colnames(.)
-
+  
 # Pull official TCGA-BRCA molecular subtypes
 brca_subtypes <- TCGAquery_subtype(tumor = "brca") %>%
   dplyr::select(patient, subtype = BRCA_Subtype_PAM50)
 
 
-# To get hormone receptor status:
-# Query the supplement (XML files)
-query_brca_supp <- GDCquery(
-    project = "TCGA-BRCA", 
-    data.category = "Clinical", 
-    data.type = "Clinical Supplement"
+# Hormone receptor status_________________________
+# 1. Query for the Biotab (text table) version of the clinical data
+query_brca_biotab <- GDCquery(
+    project = "TCGA-BRCA",
+    data.category = "Clinical",
+    data.type = "Clinical Supplement",
+    data.format = "BCR Biotab"
 )
 
-# Download the files
-GDCdownload(query_brca_supp)
+# 2. Download the small .txt files (takes seconds)
+GDCdownload(query_brca_biotab)
 
-# Parse the patient table from the XMLs
-# This returns the detailed pathology data frame
-brca_pathology_detail <- GDCprepare_clinic(query_brca_supp, clinical.info = "patient")
+# 3. Load the tables into a list
+brca_biotab_list <- GDCprepare(query_brca_biotab)
+
+# 4. Extract the specific patient clinical table
+# This is where the hormone receptor status is stored
+brca_hr_status_data <- brca_biotab_list$clinical_patient_brca
+
+# Look for the receptor status columns
+colnames(brca_hr_status_data)[grep("er_status|pr_status|her2_status", colnames(brca_hr_status_data), ignore.case = TRUE)]
+
+# Prepare the clean HR status table
+# 1. Clean the HR table by keeping only real TCGA barcodes
+brca_hr_clean <- brca_hr_status_data %>%
+  filter(grepl("^TCGA-", bcr_patient_barcode)) %>%
+  dplyr::select(
+    patient_id = bcr_patient_barcode, 
+    er_status = er_status_by_ihc, 
+    pr_status = pr_status_by_ihc, 
+    her2_status = her2_status_by_ihc
+  )
+
+# Count how many times each patient appears
+dupe_check <- brca_hr_clean %>%
+  count(patient_id) %>%
+  filter(n > 1)
+print(dupe_check)
+
+
+# Join to survival data
+brca_survival_adj <- brca_survival_data %>%
+  left_join(brca_hr_clean, by = "patient_id")
+
+# Check the first few rows to see the new columns
+head(brca_survival_adj)
+
+# Check the distribution of ER status
+table(brca_survival_adj$er_status, useNA = "always")
+# Not Evaluated]        Negative        Positive            <NA> 
+#              25             123             352               0 
+
+# Check Progesterone Receptor status
+table(brca_survival_adj$pr_status, useNA = "always")
+# [Not Evaluated]   Indeterminate        Negative        Positive            <NA> 
+#              26               1             179             294               0 
+
+# Check HER2 status
+table(brca_survival_adj$her2_status, useNA = "always")
+# [Not Available] [Not Evaluated]       Equivocal   Indeterminate        Negative        Positive            <NA> 
+#               5              86              85               7             236              81               0 
+
+# Only get patients that have definitive positive and negative for multivariate coxph model
+# Create a clean subset for the multivariate model
+brca_survival_final <- brca_survival_adj %>%
+  # Filter to keep only definitive clinical results for all three
+  filter(
+    er_status %in% c("Positive", "Negative"),
+    pr_status %in% c("Positive", "Negative"),
+    her2_status %in% c("Positive", "Negative")
+  ) %>%
+  # Convert to factors so the model treats 'Negative' as the baseline
+  mutate(
+    er_status = factor(er_status, levels = c("Negative", "Positive")),
+    pr_status = factor(pr_status, levels = c("Negative", "Positive")),
+    her2_status = factor(her2_status, levels = c("Negative", "Positive"))
+  )
+nrow(brca_survival_final)
+
+# Ensure engagement_group has the correct baseline
+brca_survival_final$engagement_group <- relevel(factor(brca_survival_final$engagement_group), ref = "Non-Engager")
+
+# Run the final adjusted model
+brca_cox_triple_adj <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + er_status + pr_status + her2_status + ajcc_pathologic_stage + age_at_index, 
+  data = brca_survival_final
+)
+
+# Generate the results
+summary(brca_cox_triple_adj)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     er_status + pr_status + her2_status + ajcc_pathologic_stage + 
+#     age_at_index, data = brca_survival_final)
+# 
+#   n= 304, number of events= 28 
+#    (11 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_groupEngager          1.111e+00  3.038e+00  5.082e-01  2.186 0.028784 *  
+# er_statusPositive               -1.410e+00  2.442e-01  7.800e-01 -1.807 0.070723 .  
+# pr_statusPositive                6.139e-02  1.063e+00  7.269e-01  0.084 0.932695    
+# her2_statusPositive              6.348e-02  1.066e+00  4.650e-01  0.137 0.891410    
+# ajcc_pathologic_stageStage IA    6.282e-01  1.874e+00  1.256e+00  0.500 0.616966    
+# ajcc_pathologic_stageStage II   -1.712e+01  3.656e-08  3.475e+04  0.000 0.999607    
+# ajcc_pathologic_stageStage IIA   9.921e-02  1.104e+00  8.165e-01  0.121 0.903298    
+# ajcc_pathologic_stageStage IIB   6.193e-02  1.064e+00  9.139e-01  0.068 0.945974    
+# ajcc_pathologic_stageStage IIIA  1.130e+00  3.095e+00  8.599e-01  1.314 0.188869    
+# ajcc_pathologic_stageStage IIIB  1.594e+00  4.925e+00  9.485e-01  1.681 0.092795 .  
+# ajcc_pathologic_stageStage IIIC -1.644e+01  7.277e-08  6.089e+03 -0.003 0.997846    
+# ajcc_pathologic_stageStage IV    3.071e+00  2.156e+01  9.179e-01  3.345 0.000822 ***
+# ajcc_pathologic_stageStage X    -1.680e+01  5.054e-08  2.664e+04 -0.001 0.999497    
+# age_at_index                     4.382e-02  1.045e+00  1.674e-02  2.617 0.008870 ** 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager         3.038e+00  3.292e-01   1.12198     8.226
+# er_statusPositive               2.442e-01  4.095e+00   0.05295     1.126
+# pr_statusPositive               1.063e+00  9.405e-01   0.25580     4.420
+# her2_statusPositive             1.066e+00  9.385e-01   0.42834     2.651
+# ajcc_pathologic_stageStage IA   1.874e+00  5.336e-01   0.15985    21.974
+# ajcc_pathologic_stageStage II   3.656e-08  2.735e+07   0.00000       Inf
+# ajcc_pathologic_stageStage IIA  1.104e+00  9.056e-01   0.22287     5.472
+# ajcc_pathologic_stageStage IIB  1.064e+00  9.399e-01   0.17741     6.380
+# ajcc_pathologic_stageStage IIIA 3.095e+00  3.231e-01   0.57377    16.697
+# ajcc_pathologic_stageStage IIIB 4.925e+00  2.030e-01   0.76738    31.609
+# ajcc_pathologic_stageStage IIIC 7.277e-08  1.374e+07   0.00000       Inf
+# ajcc_pathologic_stageStage IV   2.156e+01  4.639e-02   3.56692   130.300
+# ajcc_pathologic_stageStage X    5.054e-08  1.979e+07   0.00000       Inf
+# age_at_index                    1.045e+00  9.571e-01   1.01106     1.080
+# 
+# Concordance= 0.857  (se = 0.031 )
+# Likelihood ratio test= 36.51  on 14 df,   p=9e-04
+# Wald test            = 29.98  on 14 df,   p=0.008
+# Score (logrank) test = 57.77  on 14 df,   p=3e-07
+# 
+
+# PROBLEM 
+# coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# ajcc_pathologic_stageStage II   -1.712e+01  3.656e-08  3.475e+04  0.000 0.999607
+# the standard error for Stage II (as well as stage IIIC and stage X) is very high indicating zero events (deaths) happened in this subgroup. will collapse the groups to Stage 1,2,3,4,5
+
+# 1. Collapse sub-stages into major stages to fix zero-event categories
+brca_survival_stable <- brca_survival_final %>%
+  mutate(stage_simple = case_when(
+    grepl("Stage I$|Stage IA|Stage IB", ajcc_pathologic_stage) ~ "Stage_I",
+    grepl("Stage II$|Stage IIA|Stage IIB", ajcc_pathologic_stage) ~ "Stage_II",
+    grepl("Stage III$|Stage IIIA|Stage IIIB|Stage IIIC", ajcc_pathologic_stage) ~ "Stage_III",
+    grepl("Stage IV", ajcc_pathologic_stage) ~ "Stage_IV",
+    TRUE ~ NA_character_
+  )) %>%
+  # Filter out 'Unknown' or 'Stage X' which have no prognostic meaning
+  filter(!is.na(stage_simple)) %>%
+  mutate(stage_simple = factor(stage_simple, levels = c("Stage_I", "Stage_II", "Stage_III", "Stage_IV")))
+
+# 2. Run the stable multivariate Cox model
+brca_cox_stable <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + er_status + pr_status + her2_status + stage_simple + age_at_index, 
+  data = brca_survival_stable
+)
+
+# 3. View Summary
+summary(brca_cox_stable)
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     er_status + pr_status + her2_status + stage_simple + age_at_index, 
+#     data = brca_survival_stable)
+# 
+#   n= 302, number of events= 28 
+# 
+#                             coef exp(coef) se(coef)      z Pr(>|z|)    
+# engagement_groupEngager  1.10846   3.02969  0.49734  2.229  0.02583 *  
+# er_statusPositive       -1.35035   0.25915  0.77583 -1.741  0.08177 .  
+# pr_statusPositive       -0.01790   0.98226  0.72957 -0.025  0.98043    
+# her2_statusPositive      0.03269   1.03323  0.45249  0.072  0.94241    
+# stage_simpleStage_II    -0.07471   0.92802  0.66758 -0.112  0.91090    
+# stage_simpleStage_III    0.97823   2.65974  0.69116  1.415  0.15697    
+# stage_simpleStage_IV     2.92377  18.61127  0.80272  3.642  0.00027 ***
+# age_at_index             0.04701   1.04813  0.01470  3.197  0.00139 ** 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                         exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager    3.0297    0.33007   1.14304     8.030
+# er_statusPositive          0.2592    3.85877   0.05664     1.186
+# pr_statusPositive          0.9823    1.01806   0.23508     4.104
+# her2_statusPositive        1.0332    0.96784   0.42564     2.508
+# stage_simpleStage_II       0.9280    1.07757   0.25079     3.434
+# stage_simpleStage_III      2.6597    0.37598   0.68631    10.308
+# stage_simpleStage_IV      18.6113    0.05373   3.85921    89.754
+# age_at_index               1.0481    0.95408   1.01835     1.079
+# 
+# Concordance= 0.829  (se = 0.036 )
+# Likelihood ratio test= 33.37  on 8 df,   p=5e-05
+# Wald test            = 35.31  on 8 df,   p=2e-05
+# Score (logrank) test = 50.27  on 8 df,   p=4e-08
+# 
+
+# 4. Run Proportional Hazards Test (Assumption Check) to determine if the relative risk (HR) is constant over the entire follow-up period
+ph_test <- cox.zph(brca_cox_stable)
+print(ph_test)
+#                  chisq df     p
+# engagement_group  4.452  1 0.035
+# er_status         0.519  1 0.471
+# pr_status         0.455  1 0.500
+# her2_status       1.036  1 0.309
+# stage_simple      2.308  3 0.511
+# age_at_index      1.662  1 0.197
+# GLOBAL           17.856  8 0.022
+
+# Visualizes how the hazard changes over time
+plot(ph_test[1]) # [1] refers to the first variable: engagement_group
+abline(h = 0, col = "red")
+# Result: the risk associated with the engager group is not constant over time but is higher as time increases meaning has more long-term impact than short term impact
+# 
+
 ```
 
 ## COAD
