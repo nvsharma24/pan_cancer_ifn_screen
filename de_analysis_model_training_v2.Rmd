@@ -1970,7 +1970,7 @@ ggplot(coad_engagement_scores, aes(x = engagement_prob)) +
   theme_minimal() +
   labs(
     title = "Distribution of Engager Status Probabilities in COAD",
-    x = "Probability of Engager Status (0 to 1)",
+    x = "Probability of Engager Status",
     y = "Density"
   )
 ```
