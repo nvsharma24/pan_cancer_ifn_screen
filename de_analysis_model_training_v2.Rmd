@@ -1424,7 +1424,7 @@ dim(brca_vst_counts)
 
 
 
-# 1. Map the Ensembl IDs in brca_vst_counts to Symbols using your existing res_df
+# 1. Map the Ensembl IDs in brca_vst_counts to Symbols using existing res_df
 # Using match ensures the order remains identical to the matrix columns
 gene_symbols <- brca_deseq2_test$res_df$gene_name[match(rownames(brca_vst_counts), rownames(brca_deseq2_test$res_df))]
 rownames(brca_vst_counts) <- gene_symbols
@@ -1490,7 +1490,7 @@ ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
     y = "Predicted Probability of Engager Status",
     x = NULL
   ) +
-  theme(legend.position = "none", plot.title = element_text(face = "bold")) +
+  theme(legend.position = "none", plot.title = element_text(face = "bold", size = 10)) +
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
 # ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
@@ -1609,6 +1609,7 @@ print(gene_weights)
 ```
 
 ## COAD
+COAD LOOCV: 26-Gene Signature (AUC = 0.889)
 ```{r}
 coad_data_counts <- prepare_and_cache_rnaseq("COAD", candidate_sample_groups)
 
