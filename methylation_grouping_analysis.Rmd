@@ -1,0 +1,616 @@
+---
+title: "methylation_analysis_v1.Rmd"
+output: html_document
+date: "2026-04-01"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = "hide")
+
+
+```
+
+
+```{r packages}
+if(!require("BiocManager", quietly = T))
+  install.packages("BiocManager")
+
+# Install the necessary bioinformatics packages
+# TCGAbiolinks: for data access
+# GSVA: for the 94-gene signature scoring
+# SummarizedExperiment: the standard data container for TCGA data
+BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+BiocManager::install("sesameData")
+BiocManager::install("sesame")
+BiocManager::install("sesame")
+BiocManager::install("edgeR")
+BiocManager::install("org.Hs.eg.db")
+
+install.packages("nloptr")
+install.packages("ggpubr")
+install.packages("cowplot")
+install.packages("gt")
+install.packages("minifi")
+
+```
+
+
+```{r load packages}
+library(BiocManager)
+library(TCGAbiolinks)
+library(GSVA)
+library(SummarizedExperiment)
+library(tidyverse)
+library(nloptr)
+library(ggpubr)
+library(cowplot)
+library(gt)
+library(webshot2)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(sesameData)
+library(sesame)
+library(edgeR)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+```
+
+# Check which methylation data are available for candidate cancer types
+```{r}
+
+candidates <- c("TCGA-HNSC", "TCGA-STAD", "TCGA-KIRC", "TCGA-BLCA", 
+                "TCGA-KIRP", "TCGA-BRCA", "TCGA-COAD")
+
+# Query methylation data availability for one cancer first
+query_met <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation 450"
+)
+
+getResults(query_met) %>% 
+  count(sample_type)
+
+#           sample_type   n
+# 1          Metastatic   2
+# 2       Primary Tumor 528
+# 3 Solid Tissue Normal  50
+
+
+```
+
+# Check clinical data availability
+```{r}
+
+# Get clnicial data
+clinical_hnsc <- GDCquery_clinic("TCGA-HNSC", type = "clinical")
+
+clinical_hnsc <- GDCquery_clinic("TCGA-HNSC", type = "BCR XML")
+
+query_clin <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "Clinical",
+  data.type = "Clinical Supplement",
+  data.format = "BCR XML"
+)
+
+GDCdownload(query_clin)
+clinical_hnsc <- GDCprepare_clinic(query_clin, clinical.info = "patient")
+
+# What outcome variables are available?
+colnames(clinical_hnsc)
+
+# Check for specific survival columns 
+clinical_hnsc %>% 
+  select(any_of(c("vital_status", 
+                  "days_to_death",
+                  "days_to_last_followup",
+                  "tumor_stage",
+                  "ajcc_pathologic_stage"))) %>% 
+  View()
+
+clinical_hnsc %>% 
+  select(vital_status, 
+         days_to_death,
+         days_to_last_followup,
+         stage_event_pathologic_stage) %>% 
+  summarise(
+    n_total = n(),
+    n_vital_status = sum(!is.na(vital_status)),
+    n_days_to_death = sum(!is.na(days_to_death)),
+    n_days_to_last_followup = sum(!is.na(days_to_last_followup))
+  )
+
+  # n_total n_vital_status n_days_to_death n_days_to_last_followup
+  #    528            160             170                     314
+
+# The number of patients with vital_status is only 160 ~30%
+# need to define who is dead vs who is censored
+
+# Check how many patients have either days_to_death OR days_to_last_followup but are missing vital_status
+clinical_hnsc %>%
+  count(vital_status, is.na(days_to_death))
+
+
+```
+
+# Data Availability table across all candidate cancer types 
+Checking for methylation, RNA-seq (GSEA, IFN signature score analsyes), DNA-seq (for immunotherapy-related biomarker correlations), and survival data
+```{r}
+check_data_availability <- function(project_id) {
+  
+  message("Checking: ", project_id)
+  
+  # Methylation
+  met <- tryCatch({
+    q <- GDCquery(project = project_id,
+                  data.category = "DNA Methylation",
+                  data.type = "Methylation Beta Value",
+                  platform = "Illumina Human Methylation 450")
+    res <- getResults(q)
+    tibble(
+      n_met_tumor = sum(res$sample_type == "Primary Tumor"),
+      n_met_normal = sum(res$sample_type == "Solid Tissue Normal")
+    )
+  }, error = function(e) tibble(n_met_tumor = NA, n_met_normal = NA))
+  
+  # RNA-seq
+  rna <- tryCatch({
+    q <- GDCquery(project = project_id,
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  workflow.type = "STAR - Counts",
+                  sample.type = c("Primary Tumor", "Solid Tissue Normal"))
+    res <- getResults(q)
+    tibble(
+      n_rna_tumor = sum(res$sample_type == "Primary Tumor"),
+      n_rna_normal = sum(res$sample_type == "Solid Tissue Normal")
+    )
+  }, error = function(e) tibble(n_rna_tumor = NA, n_rna_normal = NA))
+  
+  # DNA-seq (WXS for somatic mutations/TMB/KRAS)
+  dna <- tryCatch({
+  q <- GDCquery(project = project_id,
+                data.category = "Simple Nucleotide Variation",
+                data.type = "Masked Somatic Mutation")
+  res <- getResults(q)
+  tibble(n_dna_tumor = nrow(res))
+}, error = function(e) tibble(n_dna_tumor = NA))
+  # Clinical
+  clin <- tryCatch({
+    q <- GDCquery(project = project_id,
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement",
+                  data.format = "BCR XML")
+    res <- getResults(q)
+    tibble(n_clinical = nrow(res))
+  }, error = function(e) tibble(n_clinical = NA))
+  
+  bind_cols(tibble(project = project_id), met, rna, dna, clin)
+}
+
+# Run across candidates
+candidates <- c("TCGA-HNSC", "TCGA-STAD", "TCGA-KIRC", 
+                "TCGA-BLCA", "TCGA-KIRP", "TCGA-BRCA", "TCGA-COAD")
+
+availability_table <- map_dfr(candidates, check_data_availability)
+
+print(availability_table)
+```
+
+## make table
+```{r}
+
+availability_table %>%
+  gt() %>%
+  tab_header(
+    title = "TCGA Data Availability for Candidate Cancer Types"
+  ) %>%
+  cols_label(
+    project = "Cancer Type",
+    n_met_tumor = "Tumor",
+    n_met_normal = "Normal",
+    n_rna_tumor = "Tumor",
+    n_rna_normal = "Normal",
+    n_dna_tumor = "Tumor",
+    n_clinical = "Cases"
+  ) %>%
+  tab_spanner(label = "Methylation", columns = c(n_met_tumor, n_met_normal)) %>%
+  tab_spanner(label = "RNA-seq", columns = c(n_rna_tumor, n_rna_normal)) %>%
+  tab_spanner(label = "DNA-seq", columns = n_dna_tumor) %>%
+  tab_spanner(label = "Clinical", columns = n_clinical) %>%
+  tab_style(
+    style = cell_fill(color = "#f0f0f0"),
+    locations = cells_body(rows = seq(1, nrow(availability_table), 2))
+  ) %>%
+  opt_table_font(font = "Arial")
+```
+
+
+ Checking things
+```{r}
+q <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "Simple Nucleotide Variation",
+  data.type = "Masked Somatic Mutation"
+)
+```
+
+
+# Read in coordinate bed file of poliii loci
+```{r}
+pol3_loci <- read.table("~/PolIII_ON_OFF_map_sample_TCGA_5ppp.bed",
+                        header = TRUE,
+                        sep = "\t",
+                        stringsAsFactors = FALSE)
+
+View(pol3_loci)
+dim(pol3_loci)
+# [1] 9663  340
+
+# How many RIG-I recognized loci do we have? ####
+table(pol3_loci$is_5ppp)
+#    0    1 
+# 9531  132 
+
+# What RNA types are in the engager set ####
+pol3_loci %>% 
+  filter(is_5ppp ==1) %>% 
+  count(V8) %>% 
+  arrange(desc(n))
+
+#             V8  n
+# 1         tRNA 80
+# 2   snaR A RNA 14
+# 3       u6 RNA 14
+# 4 snaR B-I RNA 10
+# 5      5S rRNA  7
+# 6        Y RNA  3
+# 7          SRP  2
+# 8        Vault  2
+
+
+# What chromosomes are they on ####
+pol3_loci %>%
+  filter(is_5ppp == 1) %>%
+  count(V1) %>%
+  arrange(desc(n))
+#       V1  n
+# 1   chr6 35
+# 2  chr19 25
+# 3   chr1 15
+# 4   chr7 10
+# 5  chr16  6
+# 6   chr2  5
+# 7  chr10  4
+# 8  chr14  4
+# 9  chr17  4
+# 10  chr5  4
+# 11 chr12  3
+# 12  chr9  3
+# 13 chr11  2
+# 14 chr13  2
+# 15 chr15  2
+# 16  chr4  2
+# 17  chr8  2
+# 18 chr18  1
+# 19 chr20  1
+# 20  chr3  1
+# 21  chrX  1
+
+# Count how many loci are RIG-I engagers by cancer type ####
+
+# get necessary info and convert to long format
+pol3_loci_long <- pol3_loci %>% 
+  mutate(across(c(V2,V3,ACC.265:UCEC.96), as.character)) %>% 
+  select(V1, V2, V3, gene_name, is_5ppp, ACC.265:UCEC.96) %>% 
+  pivot_longer(-c(gene_name, is_5ppp, V1, V2, V3),         #Don't want to pivot these columns
+               names_to = "sample",
+               values_to = "accessibility") %>% #View()  
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+"),
+         accessibility = as.integer(accessibility)) #%>%  View()
+```
+
+## Descriptive summary tables
+```{r}
+# Tables to categorize the different groups of Pol3 loci ####
+per_sample_loci_summary_df <- pol3_loci_long %>% 
+  group_by(sample) %>% 
+  summarise(
+    n_engager_loci = sum(accessibility == 1 & is_5ppp==1),
+    n_non_engager_loci = sum(accessibility == 1 & is_5ppp==0),
+    n_methylated_loci = sum(accessibility == 0 & is_5ppp ==0),
+    n_discrepant_loci = sum(accessibility==0 & is_5ppp == 1),
+    .groups = "drop"
+  ) %>% 
+  mutate(pct_engager_loci = n_engager_loci/9663) %>%  # percent of pol3 loci that are both accessible and rigi recognized 
+  mutate(pct_accessible_loci_that_are_engager_loci = n_engager_loci/(n_engager_loci + n_non_engager_loci)) #%>% View
+
+
+# Histogram plot the distribution of pct_accessible_loci_that_are_engager_loci
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = pct_accessible_loci_that_are_engager_loci, fill = cancer_type)) +
+  geom_histogram(binwidth = 0.005, color = "black", linewidth = 0.3) +
+  facet_wrap(~cancer_type, scales = "free_y") +
+  theme_minimal() +
+  labs(x = "% accessible POL III loci that are RIG-I engagers", y = "N samples") +
+  theme(legend.position = "none")
+
+# Violin plot
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = cancer_type, y = pct_accessible_loci_that_are_engager_loci, fill = cancer_type)) +
+  geom_violin() +
+  geom_jitter(width = 0.1, size = 1, alpha = 0.5) +
+  theme_minimal() +
+  labs(y = "% accessible POL III loci that are RIG-I engagers", x = NULL) +
+  theme(legend.position = "none")
+
+# Boxplot
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = cancer_type, y = pct_accessible_loci_that_are_engager_loci, fill = cancer_type)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, size = 1, alpha = 0.5) +
+  theme_minimal() +
+  labs(y = "% accessible POL III loci that are RIG-I engagers", x = NULL) +
+  theme(legend.position = "none")
+
+# number of samples in each quartile
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  group_by(cancer_type) %>%
+  mutate(quartile = ntile(pct_accessible_loci_that_are_engager_loci, 4)) %>%
+  count(cancer_type, quartile) %>% View
+
+  ungroup
+
+per_sample_loci_summary_df %>%
+  filter(n_engager_loci == 0) %>%
+  nrow()
+
+
+```
+
+
+
+
+# Check overlap with TCGA data. Are these loci covered in the TCGA methylation arrays?
+```{r}
+
+# Get TCGA coordinates from GDCportal pull ####
+results_df <- getResults(query_met)
+barcodes <- results_df$cases.submitter_id[results_df$sample_type == "Primary Tumor"][1:2]
+barcodes
+
+query_met_small <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation 450",
+  barcode = barcodes
+)
+
+GDCdownload(query_met_small)
+se_met_small <- GDCprepare(query_met_small)
+probe_coords <- as.data.frame(rowRanges(se_met_small))
+head(probe_coords)
+dim(probe_coords)
+
+# Check overlap with pol III loci ####
+
+pol3_met_gr <- GRanges(
+  seqnames = pol3_loci$V1,
+  ranges = IRanges(start = as.integer(pol3_loci$V2), 
+                   end = as.integer(pol3_loci$V3)),
+  gene_name = pol3_loci$gene_name,
+  is_5ppp = pol3_loci$is_5ppp
+)
+
+# Create GRanges from 450k probes
+pol3_gr <- GRanges(
+  seqnames = pol3_loci$V1,
+  ranges = IRanges(start = as.integer(pol3_loci$V2), 
+                   end = as.integer(pol3_loci$V3)),
+  gene_name = pol3_loci$gene_name,
+  is_5ppp = pol3_loci$is_5ppp
+)
+
+# Create GRanges from 450k probes
+probe_gr <- GRanges(
+  seqnames = probe_coords$seqnames,
+  ranges = IRanges(start = probe_coords$start,
+                   end = probe_coords$end),
+  probe_id = rownames(probe_coords)
+)
+
+# Find overlaps 
+# 320 overlaps out of 9663 polIII loci -- only 2.6% coverage 
+methylation_array_atac_seq_overlaps <- findOverlaps(pol3_gr, probe_gr)
+methylation_array_atac_seq_overlaps 
+
+# How many unique POL III loci have coverage
+n_covered <- length(unique(queryHits(methylation_array_atac_seq_overlaps)))
+n_total <- length(pol3_gr)
+cat("Covered loci:", n_covered, "out of", n_total, "(", round(n_covered/n_total*100, 1), "%)\n")
+
+# How many are engagers (is_5ppp=1) vs non-engagers
+covered_loci <- pol3_loci[unique(queryHits(overlaps)), ]
+table(covered_loci$is_5ppp)
+
+# Does TCGA have EPIC (850k) data?
+query_epic <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation EPIC"
+)
+getResults(query_epic) %>% nrow()
+```
+
+# Grouping - don't have good enough coverage for unsupervised clustering will assign groups based on trisphosphatome and ATACseq data
+
+```{r}
+# Count n_engager_loci per sample
+# Engager = is_5ppp==1 AND accessible==1 (excluding discrepant)
+n_engager_loci_per_sample <- pol3_loci_long %>%
+  filter(accessibility == 1, is_5ppp == 1) %>%
+  group_by(sample, cancer_type) %>%
+  summarise(
+    n_engager_loci = n_distinct(paste(V1, V2, V3)),
+    .groups = "drop"
+  )
+
+# Plot distribution per cancer type
+ggplot(n_engager_loci_per_sample, aes(x = n_engager_loci, fill = cancer_type)) +
+  geom_histogram(binwidth = 1, color = "black", linewidth=0.3) +
+  facet_wrap(~cancer_type, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Distribution of RIG-I Engager Loci per Sample",
+    x = "N engager loci accessible",
+    y = "N samples"
+  ) +
+  theme(legend.position = "none")
+```
+
+## Annotate samples in bed file with corresponding TCGA barcodes
+```{r}
+# Get metafile table to convert sample indices to project ids then get barcodes to retrieve RNAseq sample data
+
+gdc_sample_metadata <- read_csv("~/gdc_sample_sheet_1.txt")
+View(gdc_sample_metadata)
+
+# Create matching key from project_id
+gdc_sample_metadata <- gdc_sample_metadata %>% 
+  mutate(sample = str_replace(project_id, "TCGA-", "") %>% 
+           str_replace("-", "."))
+
+# Some samples had more than one BAM file so need to de-dup (e.g. COAD.3, COAD.343, COAD.408 all map to TCGA-AA-A010 because in gdc_sample_metadata that case had 3 BAM files so 3 different atacseq samples mapped to the same tCGA case)
+
+
+# Join to n_engager_loci_per_sample
+n_engager_loci_per_sample_final <- n_engager_loci_per_sample %>% 
+  left_join(gdc_sample_metadata %>% dplyr::select(sample, case_id, sample_id, sample_type),
+            by = "sample") %>% 
+  group_by(case_id) %>% 
+  slice_max(n_engager_loci, n=1, with_ties = FALSE) %>% 
+  ungroup
+
+View(n_engager_loci_per_sample_final)
+```
+
+## Classify samples into engagers, non-engagers, and baseline based on triphosphatome and atac-seq
+```{r}
+# make DF for type of loci (engager loci, etc) for each sample ####
+per_sample_loci_summary_df <- pol3_loci_long %>% 
+  group_by(sample) %>% 
+  summarise(
+    n_engager_loci = sum(accessibility == 1 & is_5ppp==1),
+    n_non_engager_loci = sum(accessibility == 1 & is_5ppp==0),
+    n_methylated_loci = sum(accessibility == 0 & is_5ppp ==0),
+    n_discrepant_loci = sum(accessibility==0 & is_5ppp == 1),
+    .groups = "drop"
+  ) %>% 
+  mutate(pct_engager_loci = n_engager_loci/9663) %>%  # percent of pol3 loci that are both accessible and rigi recognized 
+  mutate(pct_accessible_loci_that_are_engager_loci = n_engager_loci/(n_engager_loci + n_non_engager_loci)) #%>% View
+
+
+# Histogram plot the distribution of pct_accessible_loci_that_are_engager_loci ####
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = pct_accessible_loci_that_are_engager_loci, fill = cancer_type)) +
+  geom_histogram(binwidth = 0.005, color = "black", linewidth = 0.3) +
+  facet_wrap(~cancer_type, scales = "free_y") +
+  theme_minimal() +
+  labs(x = "% accessible POL III loci that are RIG-I engagers", y = "N samples") +
+  theme(legend.position = "none")
+
+# Violin plot ####
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = cancer_type, y = pct_accessible_loci_that_are_engager_loci, fill = cancer_type)) +
+  geom_violin() +
+  geom_jitter(width = 0.1, size = 1, alpha = 0.5) +
+  theme_minimal() +
+  labs(y = "% accessible POL III loci that are RIG-I engagers", x = NULL) +
+  theme(legend.position = "none")
+
+# Boxplot ####
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = cancer_type, y = pct_accessible_loci_that_are_engager_loci, fill = cancer_type)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, size = 1, alpha = 0.5) +
+  theme_minimal() +
+  labs(y = "% accessible POL III loci that are RIG-I engagers", x = NULL) +
+  theme(legend.position = "none")
+
+# number of samples in each quartile ####
+per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  group_by(cancer_type) %>%
+  mutate(quartile = ntile(pct_accessible_loci_that_are_engager_loci, 4)) %>%
+  count(cancer_type, quartile) %>% View
+
+
+per_sample_loci_summary_df %>%
+  filter(n_engager_loci == 0) %>%
+  nrow()
+
+
+# Joing to gdc_sample_metadata to get TCGA barcodes to retrieve RNA
+
+candidate_sample_groups <- per_sample_loci_summary_df %>%
+  mutate(cancer_type = str_extract(sample, "^[A-Z]+")) %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  left_join(gdc_sample_metadata %>% dplyr::select(sample, case_id, sample_id, sample_type),
+            by = "sample") %>% 
+  group_by(case_id) %>% 
+  slice_sample(n=1) %>% 
+  ungroup() %>% 
+  group_by(cancer_type) %>%
+  mutate(quartile = ntile(pct_accessible_loci_that_are_engager_loci, 4),
+         engager_group = case_when(
+           quartile == 4 ~ "engager",
+           quartile == 1 ~ "non_engager",
+           TRUE ~ NA_character_
+         )) %>%
+  ungroup() %>% 
+  filter(!is.na(engager_group)) #%>% View()
+  
+
+# Check if there are more than one sample matching to the same case_id
+candidate_sample_groups %>% 
+  group_by(cancer_type) %>% 
+  count(case_id) %>% 
+  filter(n>1)
+
+  
+
+
+
+```
+
+# Save objects for DE analysis
+```{r}
+
+#saveRDS(candidate_sample_groups, "candidate_sample_groups.rds")
+#saveRDS(pol3_loci_long, "pol3_loci_long.rds")
+#saveRDS(pol3_gr, "pol3_gr.rds")
+
+```
+

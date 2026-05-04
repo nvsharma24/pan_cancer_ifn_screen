@@ -557,6 +557,7 @@ run_deseq2_core <- function(cancer_type, matched_samples, pol3_loci_long, ifn_ge
 
 
 ### Module 2 QC Plotting
+Dispersion plot, Volcano plot, PCA plot
 ```{r}
 generate_deseq_qc_plots <- function(deseq_output) {
   ct <- deseq_output$cancer_type
