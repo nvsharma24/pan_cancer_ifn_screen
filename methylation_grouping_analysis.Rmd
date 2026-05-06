@@ -241,7 +241,7 @@ q <- GDCquery(
 ```
 
 
-# Read in coordinate bed file of poliii loci
+# Read in coordinate bed file of PolIII loci
 ```{r}
 pol3_loci <- read.table("~/PolIII_ON_OFF_map_sample_TCGA_5ppp.bed",
                         header = TRUE,

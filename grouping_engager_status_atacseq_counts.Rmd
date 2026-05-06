@@ -1,0 +1,178 @@
+---
+title: "grouping_engager_status_atacseq_counts.Rmd"
+output: html_document
+date: "2026-05-06"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = "hide")
+
+
+```
+
+```{r packages}
+install.packages("BiocManager")
+
+# Install the necessary bioinformatics packages
+# TCGAbiolinks: for data access
+# GSVA: for the 94-gene signature scoring
+# SummarizedExperiment: the standard data container for TCGA data
+BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+BiocManager::install("sesameData")
+BiocManager::install("sesame")
+BiocManager::install("sesame")
+BiocManager::install("edgeR")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("DESeq2")
+BiocManager::install("apeglm", update = FALSE, ask = FALSE)
+BiocManager::install("survminer")
+BiocManager::install(c("BiocGenerics", "S4Vectors", "IRanges"), force = TRUE, update = TRUE, ask = FALSE)
+BiocManager::install("DESeq2", force=TRUE, update = FALSE, ask = FALSE)
+
+install.packages("nloptr")
+install.packages("ggpubr")
+install.packages("cowplot")
+install.packages("gt")
+install.packages("minifi")
+install.packages("glmnet")
+install.packages("ggrepel")
+
+
+# 4/15/26 trying to get DESeq2
+# 1. Remove the mismatched packages from your local Linux library
+remove.packages(c("BiocGenerics", "S4Vectors", "IRanges"))
+
+# 2. Force BiocManager to use the correct repository for R 4.3
+BiocManager::install(version = "3.18", ask = FALSE)
+
+# 3. Install DESeq2 cleanly from the 3.18 repository
+BiocManager::install("DESeq2", update = FALSE, ask = FALSE)
+
+BiocManager::install(c("BiocGenerics", "IRanges", "S4Vectors", "DESeq2"), update = FALSE, ask = FALSE)
+
+# 1. Delete the corrupted phantom folder directly from the file system
+unlink("/home/nvsharm/R/x86_64-pc-linux-gnu-library/4.3/S4Vectors", recursive = TRUE)
+
+# 2. Install S4Vectors by pointing explicitly to the Bioconductor 3.18 repository
+install.packages("S4Vectors", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+install.packages("IRanges", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+# 3. Test DESeq2
+library(DESeq2)
+
+
+# Install clusterProfiler and msigdbr
+BiocManager::install("clusterProfiler")
+install.packages("msigdbr")
+
+install.packages("mclust")
+install.packages("conflicted")
+
+```
+
+
+```{r load packages}
+library(BiocManager)
+library(TCGAbiolinks)
+library(GSVA)
+library(SummarizedExperiment)
+library(tidyverse)
+library(nloptr)
+library(ggpubr)
+library(cowplot)
+library(gt)
+library(webshot2)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(sesameData)
+library(sesame)
+library(edgeR)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(S4Vectors)
+library(IRanges)
+library(DESeq2)
+library(apeglm)
+library(clusterProfiler)
+library(msigdbr)
+library(glmnet)
+library(survminer)
+library(ggrepel)
+library(mclust)
+library(conflicted)
+
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("count", "dplyr")
+conflict_prefer("filter", "dplyr")
+```
+
+# Read in coordinate file of PolIII loci atac seq counts
+want samples where POL III loci that are 5ppp==1 have high ATAC-seq counts, meaning they are both recognized by RIG-I and have open chromatin allowing POL III transcription
+```{r}
+pol3_loci_atac_counts <- read.table("~/ron_TCGA_ATAC_pol3_filtered.tsv",
+                        header = TRUE,
+                        sep = "\t",
+                        stringsAsFactors = FALSE)
+
+View(pol3_loci_atac_counts)
+pol3_loci_atac_counts %>% select(c(1:10, "identifier", "is_5ppp")) %>% View
+
+
+# How many RIG-I recognized loci do we have? ####
+pol3_loci_atac_counts %>% count(is_5ppp)
+#   is_5ppp    n
+# 1       0 9502
+# 2       1  132
+
+# convert to long format
+pol3_loci_atac_counts_long <- pol3_loci_atac_counts %>% 
+  pivot_longer(
+    cols = starts_with("TCGA"),
+    names_to = "sample",
+    values_to = "counts"
+  ) %>% 
+  mutate(
+    cancer_type = str_extract(sample, "(?<=TCGA\\.)[A-Z]+"),
+    counts = as.numeric(counts),
+    sample = str_remove(sample, "^TCGA\\.")
+  ) 
+
+# filter to the is_5ppp ==1 loci only. want to find 
+engager_loci_counts_wide <- pol3_loci_atac_counts_long %>% 
+  filter(is_5ppp==1) %>% 
+  mutate(locus_id = paste(chr, start, end, sep = "_")) %>% 
+  select(sample, cancer_type, locus_id, counts) %>% 
+  pivot_wider(names_from = locus_id, values_from = counts)
+
+dim(engager_loci_counts_wide)
+# [1] 410 134 -- 410 samples and 134 columns (132 locus columns plus sample and cancer_type)
+
+# Log normalize atac seq counts
+engager_loci_counts_log2 <- engager_loci_counts_wide %>% 
+  mutate(across(where(is.numeric), ~log2(. +1)))
+
+gmm_fit <- engager_loci_counts_log2 %>% 
+  select(-sample, -cancer_type) %>% 
+  Mclust()
+
+summary(gmm_fit)
+
+# ---------------------------------------------------- 
+# Gaussian finite mixture model fitted by EM algorithm 
+# ---------------------------------------------------- 
+# 
+# Mclust EEI (diagonal, equal volume and shape) model with 9 components: 
+# 
+#  log-likelihood   n   df     BIC       ICL
+#       -63058.78 410 1328 -134107 -134111.4
+# 
+# Clustering table:
+#   1   2   3   4   5   6   7   8   9 
+#  91 167   8   4   1   1  45   1  92 
+
+```
+
