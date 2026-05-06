@@ -155,24 +155,54 @@ dim(engager_loci_counts_wide)
 engager_loci_counts_log2 <- engager_loci_counts_wide %>% 
   mutate(across(where(is.numeric), ~log2(. +1)))
 
-gmm_fit <- engager_loci_counts_log2 %>% 
-  select(-sample, -cancer_type) %>% 
-  Mclust()
 
-summary(gmm_fit)
+# Get only candidate cancer types
+engager_loci_counts_log2_candidate_cancers <- engager_loci_counts_log2 %>% 
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA"))
 
-# ---------------------------------------------------- 
-# Gaussian finite mixture model fitted by EM algorithm 
-# ---------------------------------------------------- 
-# 
-# Mclust EEI (diagonal, equal volume and shape) model with 9 components: 
-# 
-#  log-likelihood   n   df     BIC       ICL
-#       -63058.78 410 1328 -134107 -134111.4
-# 
-# Clustering table:
-#   1   2   3   4   5   6   7   8   9 
-#  91 167   8   4   1   1  45   1  92 
+# seeing how many samples are in each cancer type
+engager_loci_counts_log2_candidate_cancers %>% 
+  count(cancer_type) %>% 
+  arrange(n) 
 
+# # A tibble: 6 × 2
+#   cancer_type     n
+#   <chr>       <int>
+# 1 BLCA           10
+# 2 KIRC           16
+# 3 STAD           21
+# 4 KIRP           34
+# 5 COAD           41
+# 6 BRCA           75
+
+gmm_results_by_cancer <- engager_loci_counts_log2_candidate_cancers %>%
+  group_by(cancer_type) %>%
+  group_split() %>%
+  map_dfr(function(df) {
+    
+    ct <- unique(df$cancer_type)
+    samples <- df$sample
+    
+    fit <- df %>%
+      dplyr::select(-sample, -cancer_type) %>%
+      Mclust(G = 3)
+    
+    tibble(
+      sample = samples,
+      cancer_type = ct,
+      cluster = fit$classification,
+      prob_cluster1 = fit$z[, 1],
+      prob_cluster2 = fit$z[, 2],
+      prob_cluster3 = fit$z[, 3]
+    )
+  })
+
+gmm_results_by_cancer %>%
+  count(cancer_type, cluster)
+
+engager_loci_counts_log2_candidate_cancers %>%
+  mutate(cluster = gmm_results_by_cancer$cluster) %>%
+  group_by(cancer_type, cluster) %>%
+  summarise(mean_counts = mean(across(where(is.numeric))), .groups = "drop")
 ```
 
