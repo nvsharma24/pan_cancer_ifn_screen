@@ -2171,7 +2171,7 @@ brca_km_fit <- survfit(Surv(os_time, os_status) ~ engagement_group, data = brca_
 
 
 # 2. Generate the Kaplan-Meier Plot
-ggsurvplot(
+brca_surv_plot <- ggsurvplot(
   brca_km_fit,
   data = brca_survival_data,
   pval = TRUE,
@@ -2190,6 +2190,11 @@ ggsurvplot(
   break.time.by = 1000,
   ggtheme = theme_minimal()
 )
+
+png("~/survival_analysis_plots/brca_survplot.png", width = 7, height = 7, units = "in", res = 300)
+print(brca_surv_plot)
+dev.off()
+
 ```
 
 ### CoxPH
