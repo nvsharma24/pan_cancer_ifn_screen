@@ -73,6 +73,8 @@ library(DESeq2)
 BiocManager::install("clusterProfiler")
 install.packages("msigdbr")
 
+install.packages("PRROC")
+
 ```
 
 
@@ -102,6 +104,12 @@ library(msigdbr)
 library(glmnet)
 library(survminer)
 library(ggrepel)
+library(PRROC)
+library(conflicted)
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("count", "dplyr")
+conflict_prefer("filter", "dplyr")
 ```
 
 ```{r read objects}
@@ -338,7 +346,7 @@ prepare_and_cache_rnaseq <- function(cancer_type, matched_samples = NULL, matche
 ```
 
 
-# Functions for DE analysis
+# DE analysis
 1) run edgeR engagers vs non_engagers
 2) get up and down genes
 3) Are any up genes in IFN signature genes?
@@ -1402,7 +1410,12 @@ ggplot(blca_core_scores, aes(x = group, y = custom_metric, fill = group)) +
   stat_compare_means(method = "wilcox.test", label.x = 1.5)
 ```
 
-# 1) Predictive signature model training
+# Predictive signature 
+# 1) Model training
+```{r}
+model_results_list <- list()
+```
+
 ## BRCA
 ```{r}
 brca_data_counts <- prepare_and_cache_rnaseq("BRCA", candidate_sample_groups)
@@ -1465,53 +1478,48 @@ library(pROC)
 auc_val <- as.numeric(auc(roc(y, brca_predicted_probs, quiet = TRUE)))
 cor_val <- cor(brca_predicted_probs, y)
 
-# Redo plots by redefining results_df first!!!!!!!!!
+
 results_df <- data.frame(
   true_label = factor(y, labels = c("Non-Engager", "Engager")),
   pred_prob = brca_predicted_probs
 )
 
-# results_df <- data.frame(
-#   true_label = factor(y, levels = c(0, 1), labels = c("Non-Engager", "Engager")), 
-#   pred_prob = brca_predicted_probs
-# )
+# Save results_df for brca
+model_results_list$brca <- results_df
 
-
+# Boxplot with pearson correlation ####
 # 2. Map colors directly by position: 1st level (Non-Engager) = blue, 2nd level (Engager) = red
-ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
+lasso_boxplot <- ggplot(model_results_list$brca, aes(x = true_label, y = pred_prob, fill = true_label)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
   geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
   theme_minimal() +
   scale_fill_manual(values = c("blue", "red")) +
   scale_color_manual(values = c("blue", "red")) +
   labs(
-    title = paste0("BRCA LOOCV: 133-Gene Signature (AUC = ", round(auc_val, 3), ")"),
+    title = paste0("BRCA LOOCV Across 133 DE Genes (AUC = ", round(auc_val, 3), ")"),
     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
     y = "Predicted Probability of Engager Status",
     x = NULL
   ) +
-  theme(legend.position = "none", plot.title = element_text(face = "bold", size = 10)) +
+  theme(legend.position = "none", 
+        plot.title = element_text(face = "bold", size = 10),
+        plot.subtitle = element_text(size = 9)) +
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
-# ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
-#   geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
-#   geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
-#   theme_minimal() +
-#   scale_fill_manual(values = group_colors) +
-#   scale_color_manual(values = group_colors) +
-#   labs(
-#     title = paste0("BRCA LOOCV: 133-Gene Signature (AUC = ", round(auc_val, 3), ")"),
-#     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
-#     y = "Predicted Probability of Engager Status",
-#     x = NULL
-#   ) +
-#   theme(legend.position = "none", plot.title = element_text(face = "bold")) +
-#   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
+ggsave(
+  filename = "model_plots/v2/brca_lasso_boxplot.png", 
+  plot = lasso_boxplot, 
+  width = 5.5,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
 
-# AUC Plot
+
+# ROC Plot ####
 # Calculate the ROC object
 # Ensures "Engager" is treated as the positive class
-roc_obj <- roc(results_df$true_label, results_df$pred_prob, levels = c("Non-Engager", "Engager"))
+roc_obj <- roc(model_results_list$brca$true_label, model_results_list$brca$pred_prob, levels = c("Non-Engager", "Engager"))
 
 # Extract coordinates for ggplot
 roc_data <- data.frame(
@@ -1519,19 +1527,66 @@ roc_data <- data.frame(
   TPR = roc_obj$sensitivities
 )
 
-# Generate the ROC plot
-ggplot(roc_data, aes(x = FPR, y = TPR)) +
+roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
   #geom_line(color = "red", size = 1) +
   geom_path(color = "red", size = 1) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
   theme_minimal() +
   labs(
-    title = "ROC Curve: BRCA LOOCV 133-Gene Signature",
+    title = "ROC Curve: BRCA LOOCV Across 133 DE Genes",
     subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
     x = "False Positive Rate (1 - Specificity)",
     y = "True Positive Rate (Sensitivity)"
   ) +
   theme(plot.title = element_text(face = "bold"))
+
+ggsave(
+  filename = "model_plots/v2/brca_lasso_roc_curve.png", 
+  plot = roc_plot, 
+  width = 6,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+
+# PR curve ####
+# Calculate the pr object
+brca_pr_obj <- pr.curve(
+  scores.class0 = model_results_list$brca %>% 
+    filter(true_label == "Engager") %>% 
+    pull(pred_prob),
+  scores.class1 = model_results_list$brca %>% 
+    filter(true_label == "Non-Engager") %>% 
+    pull(pred_prob),
+  curve = TRUE
+)
+
+pr_plot <- as.data.frame(brca_pr_obj$curve) %>% 
+  setNames(c("recall", "precision", "threshold")) %>% 
+  ggplot(aes(x = recall, y = precision)) +
+  geom_path(color = "blue", linewidth = 1) + 
+  theme_minimal() +
+  labs(
+    title = "Precision-Recall Curve: BRCA LOOCV Across 133 DE Genes",
+    subtitle = paste0("PR AUC = ", round(brca_pr_obj$auc.integral, 3)),
+    x = "Recall (True Positive Rate)",
+    y = "Precision (Positive Predictive Value)"
+  ) +
+  theme(plot.title = element_text(face = "bold")) +
+  geom_hline(
+    yintercept = sum(model_results_list$brca$true_label == "Engager") / nrow(model_results_list$brca), 
+    linetype = "dashed", color = "grey"
+  )
+
+ggsave(
+  filename = "model_plots/v2/brca_lasso_pr_curve.png", 
+  plot = pr_plot, 
+  width = 6,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
 
 # LOOCV Loop for Core 11 Genes____####
 
@@ -1661,6 +1716,7 @@ for(i in 1:n_samples) {
 
 # Evaluation and Plotting_____####
 
+# Boxplot with Pearson Correlation ####
 library(pROC)
 auc_val <- as.numeric(auc(roc(y, coad_predicted_probs, quiet = TRUE)))
 cor_val <- cor(coad_predicted_probs, y)
@@ -1670,25 +1726,41 @@ results_df <- data.frame(
   pred_prob = coad_predicted_probs
 )
 
-ggplot(results_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
+model_results_list$coad <- results_df
+rm(results_df)
+
+lasso_boxplot <- ggplot(model_results_list$coad, aes(x = true_label, y = pred_prob, fill = true_label)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
   geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
   theme_minimal() +
   scale_fill_manual(values = c("Non-Engager" = "#4575b4", "Engager" = "#d73027")) +
   scale_color_manual(values = c("Non-Engager" = "#4575b4", "Engager" = "#d73027")) +
   labs(
-    title = paste0("COAD LOOCV: 26-Gene Signature (AUC = ", round(auc_val, 3), ")"),
+    title = paste0("COAD LOOCV Across 26 DE Genes (AUC = ", round(auc_val, 3), ")"),
     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
     y = "Predicted Probability of Engager Status",
     x = NULL
   ) +
-  theme(legend.position = "none", plot.title = element_text(face = "bold")) +
+  theme(legend.position = "none", 
+        plot.title = element_text(face = "bold", size = 10),
+        plot.subtitle = element_text(size = 9)) +
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
+
+ggsave(
+  filename = "model_plots/v2/coad_lasso_boxplot.png", 
+  plot = lasso_boxplot, 
+  width = 5.5,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+
 
 # AUC Plot
 # Calculate the ROC object
 # Ensures "Engager" is treated as the positive class
-roc_obj <- roc(results_df$true_label, results_df$pred_prob, levels = c("Non-Engager", "Engager"))
+roc_obj <- roc(model_results_list$coad$true_label, model_results_list$coad$pred_prob, levels = c("Non-Engager", "Engager"))
 
 # Extract coordinates for ggplot
 roc_data <- data.frame(
@@ -1696,19 +1768,68 @@ roc_data <- data.frame(
   TPR = roc_obj$sensitivities
 )
 
-# Generate the ROC plot
-ggplot(roc_data, aes(x = FPR, y = TPR)) +
+# ROC plot ####
+roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
   #geom_line(color = "red", size = 1) +
   geom_path(color = "red", size = 1) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
   theme_minimal() +
   labs(
-    title = "ROC Curve: COAD LOOCV 26 Gene Signature",
+    title = "ROC Curve: COAD LOOCV Across 26 Genes",
     subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
     x = "False Positive Rate (1 - Specificity)",
     y = "True Positive Rate (Sensitivity)"
   ) +
   theme(plot.title = element_text(face = "bold"))
+
+ggsave(
+  filename = "model_plots/v2/coad_lasso_roc_curve.png", 
+  plot = roc_plot, 
+  width = 6,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+# PR Curve ####
+# Calculate the pr object
+coad_pr_obj <- pr.curve(
+  scores.class0 = model_results_list$coad %>% 
+    filter(true_label == "Engager") %>% 
+    pull(pred_prob),
+  scores.class1 = model_results_list$coad %>% 
+    filter(true_label == "Non-Engager") %>% 
+    pull(pred_prob),
+  curve = TRUE
+)
+
+
+pr_plot <- as.data.frame(coad_pr_obj$curve) %>% 
+  setNames(c("recall", "precision", "threshold")) %>% 
+  ggplot(aes(x = recall, y = precision)) +
+  geom_path(color = "blue", linewidth = 1) + 
+  theme_minimal() +
+  labs(
+    title = "Precision-Recall Curve: COAD LOOCV Across 26 DE Genes",
+    subtitle = paste0("PR AUC = ", round(coad_pr_obj$auc.integral, 3)),
+    x = "Recall (True Positive Rate)",
+    y = "Precision (Positive Predictive Value)"
+  ) +
+  theme(plot.title = element_text(face = "bold")) +
+  geom_hline(
+    yintercept = sum(model_results_list$coad$true_label == "Engager") / nrow(model_results_list$coad), 
+    linetype = "dashed", color = "grey"
+  )
+
+ggsave(
+  filename = "model_plots/v2/coad_lasso_pr_curve.png", 
+  plot = pr_plot, 
+  width = 6,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
 
 ```
 
