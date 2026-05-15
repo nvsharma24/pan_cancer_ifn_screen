@@ -74,6 +74,7 @@ BiocManager::install("clusterProfiler")
 install.packages("msigdbr")
 
 install.packages("PRROC")
+install.packages("webshot2")
 
 ```
 
@@ -106,6 +107,7 @@ library(survminer)
 library(ggrepel)
 library(PRROC)
 library(conflicted)
+library(webshot2)
 
 conflict_prefer("select", "dplyr")
 conflict_prefer("count", "dplyr")
@@ -1895,6 +1897,50 @@ brca_final_weights <- as.matrix(coef(brca_model_133_final, s = "lambda.min"))
 brca_active_genes <- brca_final_weights[brca_final_weights[, 1] != 0, , drop = FALSE]
 print(brca_active_genes) # Every gene has a positive coefficient!
 
+# Save as tsv
+brca_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  write_tsv("~/model_plots/v2/brca_lasso_gene_signature.tsv")
+
+# Get genes and weights ####
+brca_gene_signature_table <- brca_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  # Make table
+  gt() %>%
+  tab_header(
+    title = "BRCA 19-Gene LASSO Signature Coefficients",
+    subtitle = "Selected from 133 Candidate DE Genes (BRCA Cohort)"
+  ) %>%
+  cols_label(
+    gene_symbol = "Gene Symbol",
+    coefficient = "LASSO Coefficient (β)"
+  ) %>%
+  fmt_number(
+    columns = coefficient,
+    decimals = 4
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(rows = gene_symbol == "(Intercept)")
+  ) %>%
+  tab_options(
+    table.width = px(400),
+    column_labels.background.color = "whitesmoke"
+  ) 
+
+brca_gene_signature_table
+
+
+
+
 # 3. Align the 1,095 Validation Samples
 # Subsetting the large matrix using the exact row order of the discovery matrix
 brca_x_val_133 <- t(brca_mat_full[rownames(brca_vst_133), ])
@@ -2028,6 +2074,49 @@ print(coad_active_genes)
 # PDPK2P        1.01272774
 # EOLA1-DT      0.39995442
 # CHMP1B2P      0.51472922
+
+# Save as tsv
+coad_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  write_tsv("~/model_plots/v2/coad_lasso_gene_signature.tsv")
+
+# Get genes and weights ####
+coad_gene_signature_table <- coad_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  # Make table
+  gt() %>%
+  tab_header(
+    title = "COAD 26-Gene LASSO Signature Coefficients",
+    subtitle = "Selected from 133 Candidate DE Genes (BRCA Cohort)"
+  ) %>%
+  cols_label(
+    gene_symbol = "Gene Symbol",
+    coefficient = "LASSO Coefficient (β)"
+  ) %>%
+  fmt_number(
+    columns = coefficient,
+    decimals = 4
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(rows = gene_symbol == "(Intercept)")
+  ) %>%
+  tab_options(
+    table.width = px(400),
+    column_labels.background.color = "whitesmoke"
+  ) 
+
+coad_gene_signature_table
+
+
 
 # 3. Align the Validation Samples
 target_genes <- rownames(coad_vst)
