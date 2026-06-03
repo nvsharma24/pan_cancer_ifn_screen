@@ -1,0 +1,268 @@
+---
+title: "grouping_engager_status_atacseq_pvalue.Rmd"
+output: html_document
+date: "2026-06-03"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = "hide")
+
+
+```
+
+```{r packages}
+install.packages("BiocManager")
+
+# Install the necessary bioinformatics packages
+# TCGAbiolinks: for data access
+# GSVA: for the 94-gene signature scoring
+# SummarizedExperiment: the standard data container for TCGA data
+BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+BiocManager::install("sesameData")
+BiocManager::install("sesame")
+BiocManager::install("sesame")
+BiocManager::install("edgeR")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("DESeq2")
+BiocManager::install("apeglm", update = FALSE, ask = FALSE)
+BiocManager::install("survminer")
+BiocManager::install(c("BiocGenerics", "S4Vectors", "IRanges"), force = TRUE, update = TRUE, ask = FALSE)
+BiocManager::install("DESeq2", force=TRUE, update = FALSE, ask = FALSE)
+
+install.packages("nloptr")
+install.packages("ggpubr")
+install.packages("cowplot")
+install.packages("gt")
+install.packages("minifi")
+install.packages("glmnet")
+install.packages("ggrepel")
+
+
+# 4/15/26 trying to get DESeq2
+# 1. Remove the mismatched packages from your local Linux library
+remove.packages(c("BiocGenerics", "S4Vectors", "IRanges"))
+
+# 2. Force BiocManager to use the correct repository for R 4.3
+BiocManager::install(version = "3.18", ask = FALSE)
+
+# 3. Install DESeq2 cleanly from the 3.18 repository
+BiocManager::install("DESeq2", update = FALSE, ask = FALSE)
+
+BiocManager::install(c("BiocGenerics", "IRanges", "S4Vectors", "DESeq2"), update = FALSE, ask = FALSE)
+
+# 1. Delete the corrupted phantom folder directly from the file system
+unlink("/home/nvsharm/R/x86_64-pc-linux-gnu-library/4.3/S4Vectors", recursive = TRUE)
+
+# 2. Install S4Vectors by pointing explicitly to the Bioconductor 3.18 repository
+install.packages("S4Vectors", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+install.packages("IRanges", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+# 3. Test DESeq2
+library(DESeq2)
+
+
+# Install clusterProfiler and msigdbr
+BiocManager::install("clusterProfiler")
+install.packages("msigdbr")
+
+install.packages("mclust")
+install.packages("conflicted")
+
+BiocManager::install("ComplexHeatmap")
+
+```
+
+
+```{r load packages}
+library(BiocManager)
+library(TCGAbiolinks)
+library(GSVA)
+library(SummarizedExperiment)
+library(tidyverse)
+library(nloptr)
+library(ggpubr)
+library(cowplot)
+library(gt)
+library(webshot2)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(sesameData)
+library(sesame)
+library(edgeR)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(S4Vectors)
+library(IRanges)
+library(DESeq2)
+library(apeglm)
+library(clusterProfiler)
+library(msigdbr)
+library(glmnet)
+library(survminer)
+library(ggrepel)
+library(mclust)
+library(conflicted)
+library(ComplexHeatmap)
+
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("count", "dplyr")
+conflict_prefer("filter", "dplyr")
+```
+
+# Read in coordinate file of PolIII loci atac seq counts and pvals
+```{r}
+pol3_loci_atac_pvals <-read_csv("~/ATAC_TCGA_polIII_pValue.txt") 
+
+View(pol3_loci_atac_pvals)
+pol3_loci_atac_pvals %>% select(c(1:10, "is_5ppp")) %>% View
+
+
+# How many RIG-I recognized loci do we have? ####
+pol3_loci_atac_pvals %>% count(is_5ppp)
+# A tibble: 2 × 2
+#   is_5ppp     n
+#   <lgl>   <int>
+# 1 FALSE    3001
+# 2 TRUE      102
+
+# convert to long format
+pol3_loci_atac_pvals_long <- pol3_loci_atac_pvals %>% 
+  pivot_longer(
+    cols = starts_with("TCGA"),
+    names_to = "sample",
+    values_to = "pval"
+  ) %>% 
+  mutate(
+    cancer_type = str_extract(sample, "(?<=TCGA\\.)[A-Z]+"),
+    pval = as.numeric(pval),
+    sample = str_remove(sample, "^TCGA\\.")
+  ) 
+
+# filter to the is_5ppp ==1 loci only. want to find 
+engager_loci_pvals_wide <- pol3_loci_atac_pvals_long %>% 
+  filter(is_5ppp==1) %>% 
+  #mutate(locus_id = paste(chr, start, end, sep = "_")) %>% 
+  select(sample, cancer_type, V1, pval) %>% 
+  pivot_wider(names_from = V1, values_from = pval)
+
+dim(engager_loci_pvals_wide)
+# [1] 328 104 -- 328 samples and 104 columns (102 locus columns plus sample and cancer_type) in atac seq pvals file
+
+
+# Transform pvals for clustering
+engager_loci_pvals <- engager_loci_pvals_wide %>% 
+  mutate(across(where(is.numeric), ~ -log10(. + 1e-300)))
+
+
+# Get only candidate cancer types
+engager_loci_pvals_candidate_cancers <- engager_loci_pvals %>% 
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA"))
+
+# seeing how many samples are in each cancer type
+engager_loci_pvals_candidate_cancers %>% 
+  count(cancer_type) %>% 
+  arrange(n) 
+
+# # A tibble: 6 × 2
+#   cancer_type     n
+#   <chr>       <int>
+# 1 BLCA            8
+# 2 KIRC           11
+# 3 STAD           16
+# 4 KIRP           33
+# 5 COAD           36
+# 6 BRCA           57
+
+gmm_results_by_cancer <- engager_loci_pvals_candidate_cancers %>%
+  group_by(cancer_type) %>%
+  group_split() %>%
+  map_dfr(function(df) {
+    
+    ct <- unique(df$cancer_type)
+    samples <- df$sample
+    
+    fit <- df %>%
+      dplyr::select(-sample, -cancer_type) %>%
+      Mclust(G = 3)
+    
+    tibble(
+      sample = samples,
+      cancer_type = ct,
+      cluster = fit$classification,
+      prob_cluster1 = fit$z[, 1],
+      prob_cluster2 = fit$z[, 2],
+      prob_cluster3 = fit$z[, 3]
+    )
+  })
+
+gmm_results_by_cancer %>%
+  count(cancer_type, cluster)
+
+# A tibble: 18 × 3
+#    cancer_type cluster     n
+#    <chr>         <dbl> <int>
+#  1 BLCA              1     1
+#  2 BLCA              2     3
+#  3 BLCA              3     4
+#  4 BRCA              1    25
+#  5 BRCA              2    30
+#  6 BRCA              3     2
+#  7 COAD              1     8
+#  8 COAD              2    27
+#  9 COAD              3     1
+# 10 KIRC              1     5
+# 11 KIRC              2     5
+# 12 KIRC              3     1
+# 13 KIRP              1    16
+# 14 KIRP              2    16
+# 15 KIRP              3     1
+# 16 STAD              1    12
+# 17 STAD              2     3
+# 18 STAD              3     1
+
+
+
+
+
+##### TRASH -- averaging counts across samples did not yield anything meaningful. the clusters all had overlapping ranges of mean atac seq counts so i couldn't tell which cluster corresponded to engager, non-engager, intermediate. scrap this #####
+# Get what clusters correspond to engager or non-engager by calculating a sample score based on normalized atac seq counts
+sample_gmm_scores <- engager_loci_counts_log2_candidate_cancers %>% 
+  left_join(gmm_results_by_cancer %>% select(sample, cluster), by = "sample") %>% 
+  rowwise() %>% 
+  mutate(sample_mean_accessibility = mean(c_across(starts_with("chr")))) %>% 
+  ungroup()
+
+# Get cluster averages to map cluster numbers to engagers, non-engagers, intermediate
+cluster_definitions <- sample_gmm_scores %>% 
+  group_by(cancer_type, cluster) %>% 
+  summarise(
+    n_samples = n(),
+    avg_cluster_accessibility = mean(sample_mean_accessibility),
+    .groups = "drop"
+  ) %>% 
+  group_by(cancer_type) %>% 
+  arrange(cancer_type, desc(avg_cluster_accessibility)) %>% 
+  mutate(
+    grouping_label = case_when(
+      row_number() == 1 ~ "Engager",
+      row_number() == 2 ~ "Intermediate",
+      row_number() == 3 ~ "Non-Engager"
+    )
+  ) %>% 
+  ungroup()
+
+final_cluster_groups <- sample_gmm_scores %>% 
+  left_join(
+    cluster_definitions %>%  select(cancer_type, cluster, grouping_label),
+    by = c("cancer_type", "cluster")
+  ) %>% 
+  dplyr::select(-cluster)
+
+
+
+```
+
