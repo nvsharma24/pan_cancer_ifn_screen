@@ -72,6 +72,8 @@ install.packages("msigdbr")
 install.packages("mclust")
 install.packages("conflicted")
 
+BiocManager::install("ComplexHeatmap")
+
 ```
 
 
@@ -103,6 +105,7 @@ library(survminer)
 library(ggrepel)
 library(mclust)
 library(conflicted)
+library(ComplexHeatmap)
 
 
 conflict_prefer("select", "dplyr")
@@ -204,5 +207,44 @@ engager_loci_counts_log2_candidate_cancers %>%
   mutate(cluster = gmm_results_by_cancer$cluster) %>%
   group_by(cancer_type, cluster) %>%
   summarise(mean_counts = mean(across(where(is.numeric))), .groups = "drop")
+
+
+
+##### TRASH -- averaging counts across samples did not yield anything meaningful. the clusters all had overlapping ranges of mean atac seq counts so i couldn't tell which cluster corresponded to engager, non-engager, intermediate. scrap this #####
+# Get what clusters correspond to engager or non-engager by calculating a sample score based on normalized atac seq counts
+sample_gmm_scores <- engager_loci_counts_log2_candidate_cancers %>% 
+  left_join(gmm_results_by_cancer %>% select(sample, cluster), by = "sample") %>% 
+  rowwise() %>% 
+  mutate(sample_mean_accessibility = mean(c_across(starts_with("chr")))) %>% 
+  ungroup()
+
+# Get cluster averages to map cluster numbers to engagers, non-engagers, intermediate
+cluster_definitions <- sample_gmm_scores %>% 
+  group_by(cancer_type, cluster) %>% 
+  summarise(
+    n_samples = n(),
+    avg_cluster_accessibility = mean(sample_mean_accessibility),
+    .groups = "drop"
+  ) %>% 
+  group_by(cancer_type) %>% 
+  arrange(cancer_type, desc(avg_cluster_accessibility)) %>% 
+  mutate(
+    grouping_label = case_when(
+      row_number() == 1 ~ "Engager",
+      row_number() == 2 ~ "Intermediate",
+      row_number() == 3 ~ "Non-Engager"
+    )
+  ) %>% 
+  ungroup()
+
+final_cluster_groups <- sample_gmm_scores %>% 
+  left_join(
+    cluster_definitions %>%  select(cancer_type, cluster, grouping_label),
+    by = c("cancer_type", "cluster")
+  ) %>% 
+  dplyr::select(-cluster)
+
+
+
 ```
 
