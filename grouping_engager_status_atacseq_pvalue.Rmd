@@ -115,7 +115,7 @@ conflict_prefer("filter", "dplyr")
 
 # Read in coordinate file of PolIII loci atac seq counts and pvals
 ```{r}
-pol3_loci_atac_pvals <-read_csv("~/ATAC_TCGA_polIII_pValue.txt") 
+pol3_loci_atac_pvals <-read_csv("~/ATAC_TCGA_polIII_pValue-v2.txt") 
 
 View(pol3_loci_atac_pvals)
 pol3_loci_atac_pvals %>% select(c(1:10, "is_5ppp")) %>% View
@@ -123,11 +123,10 @@ pol3_loci_atac_pvals %>% select(c(1:10, "is_5ppp")) %>% View
 
 # How many RIG-I recognized loci do we have? ####
 pol3_loci_atac_pvals %>% count(is_5ppp)
-# A tibble: 2 × 2
 #   is_5ppp     n
 #   <lgl>   <int>
-# 1 FALSE    3001
-# 2 TRUE      102
+# 1 FALSE    9531
+# 2 TRUE      132
 
 # convert to long format
 pol3_loci_atac_pvals_long <- pol3_loci_atac_pvals %>% 
@@ -150,7 +149,7 @@ engager_loci_pvals_wide <- pol3_loci_atac_pvals_long %>%
   pivot_wider(names_from = V1, values_from = pval)
 
 dim(engager_loci_pvals_wide)
-# [1] 328 104 -- 328 samples and 104 columns (102 locus columns plus sample and cancer_type) in atac seq pvals file
+# [1] 328 134 -- 328 samples and 134 columns (132 locus columns plus sample and cancer_type) in atac seq pvals file
 
 
 # Transform pvals for clustering
@@ -208,9 +207,9 @@ gmm_results_by_cancer %>%
 #  1 BLCA              1     1
 #  2 BLCA              2     3
 #  3 BLCA              3     4
-#  4 BRCA              1    25
-#  5 BRCA              2    30
-#  6 BRCA              3     2
+#  4 BRCA              1    23
+#  5 BRCA              2    27
+#  6 BRCA              3     7
 #  7 COAD              1     8
 #  8 COAD              2    27
 #  9 COAD              3     1
@@ -220,23 +219,19 @@ gmm_results_by_cancer %>%
 # 13 KIRP              1    16
 # 14 KIRP              2    16
 # 15 KIRP              3     1
-# 16 STAD              1    12
-# 17 STAD              2     3
+# 16 STAD              1     7
+# 17 STAD              2     8
 # 18 STAD              3     1
 
-
-
-
-
-##### TRASH -- averaging counts across samples did not yield anything meaningful. the clusters all had overlapping ranges of mean atac seq counts so i couldn't tell which cluster corresponded to engager, non-engager, intermediate. scrap this #####
-# Get what clusters correspond to engager or non-engager by calculating a sample score based on normalized atac seq counts
-sample_gmm_scores <- engager_loci_counts_log2_candidate_cancers %>% 
-  left_join(gmm_results_by_cancer %>% select(sample, cluster), by = "sample") %>% 
+sample_gmm_scores <- engager_loci_pvals_candidate_cancers %>% 
+  left_join(gmm_results_by_cancer %>%  select(sample, cluster),
+            by = "sample"
+            ) %>% 
   rowwise() %>% 
   mutate(sample_mean_accessibility = mean(c_across(starts_with("chr")))) %>% 
   ungroup()
 
-# Get cluster averages to map cluster numbers to engagers, non-engagers, intermediate
+# Rank clusters within each cancer type by mean accessibility
 cluster_definitions <- sample_gmm_scores %>% 
   group_by(cancer_type, cluster) %>% 
   summarise(
@@ -250,18 +245,32 @@ cluster_definitions <- sample_gmm_scores %>%
     grouping_label = case_when(
       row_number() == 1 ~ "Engager",
       row_number() == 2 ~ "Intermediate",
-      row_number() == 3 ~ "Non-Engager"
+      row_number() == 3 ~ "Non_Engager"
     )
   ) %>% 
   ungroup()
 
-final_cluster_groups <- sample_gmm_scores %>% 
-  left_join(
-    cluster_definitions %>%  select(cancer_type, cluster, grouping_label),
-    by = c("cancer_type", "cluster")
-  ) %>% 
-  dplyr::select(-cluster)
+#write_tsv(cluster_definitions, "~/gmm_grouping/cluster_definitions/gmm_cluster_definitions.tsv")
 
+# Make the gt table figure
+cluster_definitions %>%
+  mutate(grouping_label = factor(grouping_label,
+                                 levels = c("Engager", "Intermediate", "Non_Engager"))) %>%
+  arrange(cancer_type, grouping_label) %>%
+  gt(groupname_col = "cancer_type") %>%
+  tab_header(
+    title = "GMM Cluster Assignments by Cancer Type",
+    subtitle = "Clusters ranked by mean accessibility (-log10 p-value) across 132 RIG-I engager loci"
+  ) %>%
+  cols_label(
+    cluster = "Cluster",
+    n_samples = "N Samples",
+    avg_cluster_accessibility = "Mean Accessibility",
+    grouping_label = "Group"
+  ) %>%
+  fmt_number(columns = avg_cluster_accessibility, decimals = 1) %>%
+  tab_options(row_group.background.color = "whitesmoke") %>% 
+  gtsave(.,"~/gmm_grouping/cluster_definitions/gmm_cluster_definitions_table.html")
 
 
 ```
