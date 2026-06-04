@@ -273,5 +273,13 @@ cluster_definitions %>%
   gtsave(.,"~/gmm_grouping/cluster_definitions/gmm_cluster_definitions_table.html")
 
 
+final_cluster_groups <- sample_gmm_scores %>%
+  left_join(
+    cluster_definitions %>% dplyr::select(cancer_type, cluster, grouping_label),
+    by = c("cancer_type", "cluster")
+  )
+
+#write_tsv(final_cluster_groups, "~/gmm_grouping/gmm_sample_groups.tsv")
+
 ```
 
