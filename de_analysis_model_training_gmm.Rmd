@@ -1209,15 +1209,15 @@ roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
   theme_minimal() +
   labs(
-    title = "ROC Curve: BRCA LOOCV Across 133 DE Genes",
+    title = paste0("ROC Curve: BRCA LOOCV Across ", length(brca_deseq2_test$up_genes), " DE Genes"),
     subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
-    x = "False Positive Rate (1 - Specificity)",
-    y = "True Positive Rate (Sensitivity)"
+    x = "False Positive Rate",
+    y = "True Positive Rate"
   ) +
   theme(plot.title = element_text(face = "bold"))
 
 ggsave(
-  filename = "model_plots/v2/brca_lasso_roc_curve.png", 
+  filename = "gmm_grouping/model_plots/brca_lasso_roc_curve_gmm.png", 
   plot = roc_plot, 
   width = 6,      # Width in inches
   height = 5,     # Height in inches
@@ -1244,7 +1244,7 @@ pr_plot <- as.data.frame(brca_pr_obj$curve) %>%
   geom_path(color = "blue", linewidth = 1) + 
   theme_minimal() +
   labs(
-    title = "Precision-Recall Curve: BRCA LOOCV Across 133 DE Genes",
+    title = paste0("Precision-Recall Curve: BRCA LOOCV Across ",length(brca_deseq2_test$up_genes), " DE Genes"),
     subtitle = paste0("PR AUC = ", round(brca_pr_obj$auc.integral, 3)),
     x = "Recall (True Positive Rate)",
     y = "Precision (Positive Predictive Value)"
@@ -1256,91 +1256,18 @@ pr_plot <- as.data.frame(brca_pr_obj$curve) %>%
   )
 
 ggsave(
-  filename = "model_plots/v2/brca_lasso_pr_curve.png", 
+  filename = "gmm_grouping/model_plots/brca_lasso_pr_curve_gmm.png", 
   plot = pr_plot, 
-  width = 6,      # Width in inches
+  width = 7,      # Width in inches
   height = 5,     # Height in inches
   units = "in",
   dpi = 300       # 300 DPI is the print standard
 )
 
-# LOOCV Loop for Core 11 Genes____####
 
-# 1. Define the 11-gene subset from your counts
-# (Ensures rownames are already symbols from previous step)
-brca_vst_11 <- brca_vst_counts[rownames(brca_vst_counts) %in% core_11_genes, ]
-brca_vst_11 <- brca_vst_11[!is.na(rownames(brca_vst_11)), ]
-
-# 2. Setup training data
-X_11 <- t(brca_vst_11) 
-y <- ifelse(colData(brca_deseq2_test$dds)$engager_group == "engager", 1, 0)
-n_samples <- nrow(X_11)
-predicted_probs_11 <- numeric(n_samples)
-
-# 3. The LOOCV Loop
-set.seed(42) 
-for(i in 1:n_samples) {
-  # Hide one, train on the rest
-  X_train <- X_11[-i, ]
-  y_train <- y[-i]
-  X_test  <- X_11[i, , drop = FALSE]
-  
-  # Lasso Logistic Regression
-  # nfolds=5 for internal stability in the small training set
-  cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
-  
-  # Get the "Confidence Score" for the held-out sample
-  predicted_probs_11[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
-}
-
-# 4. Calculate Final Stats
-library(pROC)
-auc_11 <- as.numeric(auc(roc(y, predicted_probs_11, quiet = TRUE)))
-cor_11 <- cor(predicted_probs_11, y)
-
-# 5. Format and Plot
-results_11_df <- data.frame(
-  true_label = factor(y, labels = c("Non-Engager", "Engager")),
-  pred_prob = predicted_probs_11
-)
-
-ggplot(results_11_df, aes(x = true_label, y = pred_prob, fill = true_label)) +
-  geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
-  geom_jitter(aes(color = true_label), width = 0.2, size = 3) +
-  theme_minimal() +
-  scale_fill_manual(values = group_colors) +
-  scale_color_manual(values = group_colors) +
-  labs(
-    title = paste0("BRCA LOOCV: Core 11-Gene Signature (AUC = ", round(auc_11, 3), ")"),
-    subtitle = paste0("Pearson Correlation: ", round(cor_11, 3)),
-    y = "Predicted Probability of Engagement",
-    x = NULL
-  ) +
-  theme(
-    legend.position = "none", 
-    plot.title = element_text(face = "bold", size = 14)
-  ) +
-  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
-
-# Extract coefficients at the optimal lambda (lambda.min)
-# This returns a sparse matrix of all genes and their weights
-weights_matrix <- coef(cv_fit, s = "lambda.min")
-
-# Convert to a standard data frame and filter for non-zero weights
-# (LASSO forces unimportant genes to 0)
-gene_weights <- data.frame(
-  gene = rownames(weights_matrix),
-  weight = as.numeric(weights_matrix)
-) %>%
-  filter(weight != 0) %>%
-  arrange(desc(abs(weight)))
-
-# View the result
-print(gene_weights)
 ```
 
 ## COAD
-COAD LOOCV: 26-Gene Signature (AUC = 0.889)
 ```{r}
 coad_data_counts <- prepare_and_cache_rnaseq("COAD", candidate_sample_groups)
 
@@ -1530,7 +1457,7 @@ rm(brca_clinical_check)
 ```
 
 ### vst normalize 
-To make sure gene expression values are the same scale as the N=29 training set
+To make sure gene expression values are the same scale as the N=30 training set
 ```{r}
 # 1. Create the DESeq container for the full cohort
 brca_dds_full <- DESeqDataSetFromMatrix(
@@ -1545,29 +1472,29 @@ brca_vst_full <- vst(brca_dds_full, blind = TRUE)
 brca_mat_full <- assay(brca_vst_full)
 
 # 3. Map Gene IDs to Symbols
-# Ensuring the rownames match your 133-gene model (e.g., RAP2C)
+# Ensuring the rownames match 104-gene model (e.g., RAP2C)
 rownames(brca_mat_full) <- rowData(brca_full_data$se)$gene_name[match(rownames(brca_mat_full), rowData(brca_full_data$se)$gene_id)]
 ```
 
 ### Get final model
-train on all 29 samples now that we know that the 133 genes are useful for predicting engager/non-engager status from the training set
+train on all 30 samples now that we know that the 104 genes are useful for predicting engager/non-engager status from the training set
 ```{r}
 
-# 1. Train the Master Model on all 29 Discovery Samples
-brca_x_train_133 <- t(brca_vst_133) 
-brca_y_labels_133 <- y              
+# 1. Train the Master Model on all 30 Discovery Samples
+brca_x_train_sig_de_genes <- t(brca_vst_sig_de_genes) 
+brca_y_labels_sig_de_genes <- y              
 
 set.seed(42)
-brca_model_133_final <- cv.glmnet(
-    x = brca_x_train_133, 
-    y = brca_y_labels_133, 
+brca_model_sig_de_genes_final <- cv.glmnet(
+    x = brca_x_train_sig_de_genes, 
+    y = brca_y_labels_sig_de_genes, 
     family = "binomial", 
     alpha = 1, 
     nfolds = 5
 )
 
 # 2. Extract the non-zero active weights for reference
-brca_final_weights <- as.matrix(coef(brca_model_133_final, s = "lambda.min"))
+brca_final_weights <- as.matrix(coef(brca_model_sig_de_genes_final, s = "lambda.min"))
 brca_active_genes <- brca_final_weights[brca_final_weights[, 1] != 0, , drop = FALSE]
 print(brca_active_genes) # Every gene has a positive coefficient!
 
@@ -1578,7 +1505,7 @@ brca_active_genes %>%
   mutate(gene_symbol = rownames(.)) %>% 
   select(gene_symbol, coefficient) %>% 
   arrange(desc(abs(coefficient))) %>% 
-  write_tsv("~/model_plots/v2/brca_lasso_gene_signature.tsv")
+  write_tsv("~/gmm_grouping/model_plots/brca_lasso_gene_signature_gmm.tsv")
 
 # Get genes and weights ####
 brca_gene_signature_table <- brca_active_genes %>% 
@@ -1590,8 +1517,8 @@ brca_gene_signature_table <- brca_active_genes %>%
   # Make table
   gt() %>%
   tab_header(
-    title = "BRCA 19-Gene LASSO Signature Coefficients",
-    subtitle = "Selected from 133 Candidate DE Genes (BRCA Cohort)"
+    title = paste0("BRCA LASSO ", nrow(brca_active_genes)-1  ," Signature Coefficients"),
+    subtitle = paste0("Selected from", length(brca_deseq2_test$up_genes) ," Candidate DE Genes")
   ) %>%
   cols_label(
     gene_symbol = "Gene Symbol",
@@ -1615,23 +1542,24 @@ brca_gene_signature_table
 
 
 
-# 3. Align the 1,095 Validation Samples
+# 3. Align the Validation Samples
 # Subsetting the large matrix using the exact row order of the discovery matrix
-brca_x_val_133 <- t(brca_mat_full[rownames(brca_vst_133), ])
+brca_x_val_sig_de_genes <- t(brca_mat_full[rownames(brca_vst_sig_de_genes), ])
 
-# error in one of the 133 genes doesn't exist in the validation matrix (brca_mat_full). maybe an issue with gene annotations
-target_genes <- rownames(brca_vst_133)
+# error in one of the 104 genes doesn't exist in the validation matrix (brca_mat_full). maybe an issue with gene annotations
+target_genes <- rownames(brca_vst_sig_de_genes)
 available_genes <- rownames(brca_mat_full)
 
 missing_genes <- setdiff(target_genes, available_genes)
-print(missing_genes)
+print(missing_genes) # None of the 14 signature genes are missing. every gene that has a coefficient is present in the full cohort and the model ignores the missing ones anyway
+# [1] "BLTP2"        "LOC124907763" "LOC100128317" "LINC02889"    "GALNT7-DT"    "FARS2-AS1"    "LOC100287808" "LOC124909423"
 
 # fix
-# 1. Extract the genes we DO have, transpose to patients-as-rows ####
+# 1. Extract the genes that are not missing those aren't in the signature anyway, transpose to patients-as-rows ####
 available_data <- brca_mat_full[rownames(brca_mat_full) %in% target_genes, ] %>% 
   t()
 
-# 2. Create a zero-filled matrix for the 7 missing genes ####
+# 2. Create a zero-filled matrix for the missing genes ####
 missing_data <- matrix(
   0, 
   nrow = nrow(available_data), 
@@ -1640,34 +1568,68 @@ missing_data <- matrix(
 )
 
 # 3. Bind them together and forcefully reorder columns to match the discovery set exactly ####
-brca_x_val_133 <- cbind(available_data, missing_data)[, target_genes]
+brca_x_val_sig_de_genes <- cbind(available_data, missing_data)[, target_genes]
 
-# Confirm dimensions are exactly 1095 rows, 133 columns
-dim(brca_x_val_133)
+# Confirm dimensions are 1095 rows, 104 columns
+dim(brca_x_val_sig_de_genes)
 
 # Clean up temporary debugging variables
 rm(target_genes, available_genes, missing_genes, available_data, missing_data)
 
 # 4. Generate the Engagement Probabilities ####
-brca_final_probs_133 <- predict(
-  brca_model_133_final, 
-  newx = brca_x_val_133, 
+brca_final_probs_sig_de_genes <- predict(
+  brca_model_sig_de_genes_final, 
+  newx = brca_x_val_sig_de_genes, 
   s = "lambda.min", 
   type = "response"
 )
 
-# 3. Consolidate into a clean, tidy tibble ####
+# 3. Consolidate into a tibble ####
 brca_engagement_scores <- tibble(
-  case_id = rownames(brca_final_probs_133),
-  engagement_prob = as.numeric(brca_final_probs_133)
+  case_id = rownames(brca_final_probs_sig_de_genes),
+  engagement_prob = as.numeric(brca_final_probs_sig_de_genes)
 )
 
 # 4. Sanity Check ####
-summary(brca_engagement_scores$engagement_prob) # Model successfully identified extremes (near 0 and near 1) and gradient meaning the signature is present and varies in the full cohort population
+# does  Model successfully identified extremes (near 0 and near 1)
+summary(brca_engagement_scores$engagement_prob) 
+
+brca_engagement_scores %>%
+  mutate(bin = cut(engagement_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
+  count(bin)
+
+# A tibble: 10 × 2
+#    bin           n
+#    <fct>     <int>
+#  1 [0,0.1]    1035
+#  2 (0.1,0.2]    15
+#  3 (0.2,0.3]     7
+#  4 (0.3,0.4]     3
+#  5 (0.4,0.5]     2
+#  6 (0.5,0.6]     4
+#  7 (0.6,0.7]     3
+#  8 (0.7,0.8]     6
+#  9 (0.8,0.9]     7
+# 10 (0.9,1]      13
+
+brca_engagement_scores %>%
+  summarise(
+    n_total = n(),
+    n_above_0.5 = sum(engagement_prob > 0.5),
+    n_above_0.25 = sum(engagement_prob > 0.25),
+    n_above_0.1 = sum(engagement_prob > 0.1)
+  )
+
+# A tibble: 1 × 4
+#   n_total n_above_0.5 n_above_0.25 n_above_0.1
+#     <int>       <int>        <int>       <int>
+# 1    1095          33           41          60
+
+# the model scored 1035 patients low and a small group of high scorers with basically nothing in between. 
+
 ```
 
 ### Histogram and density plot of engager status probabilities to see if there are multiple populations
-looks like there are two populations at the extremes. will take the extreme populations and not cutoff by the median
 ```{r}
 ggplot(brca_engagement_scores, aes(x = engagement_prob)) +
   geom_histogram(aes(y = after_stat(density)), bins = 40, fill = "steelblue", color = "black", alpha = 0.7) +
@@ -1678,6 +1640,19 @@ ggplot(brca_engagement_scores, aes(x = engagement_prob)) +
     x = "Probability of Engager Status (0 to 1)",
     y = "Density"
   )
+
+# transform y axis so you can see the small population of engagers showing it is bimodal with very few samples in between
+ggplot(brca_engagement_scores, aes(x = engagement_prob)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "black", alpha = 0.7) +
+  scale_y_sqrt() +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Engager Status Probabilities in BRCA",
+    x = "Probability of Engager Status (0 to 1)",
+    y = "Count (sqrt scale)"
+  ) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black")
+
 ```
 
 ## COAD
@@ -1865,24 +1840,24 @@ ggplot(coad_engagement_scores, aes(x = engagement_prob)) +
 # 3) Prognostic Analysis (survival curves, coxph)
 ## BRCA
 ### Survival curves
-Get poopulations by taking the top and bottom quartiles
+Get populations by using a threshold for KM curves but note that the coxph model will use the continuous probabilities (refer to notes)
 ```{r}
 
-# 1. Define the 25% (quartile) cutoffs
-lower_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.25)
-upper_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.75)
+# NOT DOING - 1. Define the 25% (quartile) cutoffs
+# lower_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.25)
+# upper_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.75)
 
 # 2. Isolate extremes, strictly filter for primary tumors, and merge
 brca_survival_data <- brca_engagement_scores %>%
-  filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
+  #filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
   mutate(
-    engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
+    #engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
     patient_id = substr(case_id, 1, 12),
     sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
   ) %>%
-  # Safeguard 1: Strictly keep only Primary Solid Tumors ("01")
+  # Safeguard 1: keep only Primary Solid Tumors ("01")
   filter(sample_type == "01") %>%
-  # Safeguard 2: Now safely drop replicate vials (A vs B)
+  # Safeguard 2: drop replicate vials (A vs B)
   distinct(patient_id, .keep_all = TRUE) %>%
   
   # Join and build survival variables
@@ -1898,8 +1873,20 @@ brca_survival_data <- brca_engagement_scores %>%
 
 # 3. Verify the final dataset
 dim(brca_survival_data)
-#  500 101
-table(brca_survival_data$engagement_group, brca_survival_data$os_status)
+#  [1] 1012  100 - 1012 patients with survival data
+
+# Check how cutting the probabilities would split the 1012 at two thresholds
+brca_survival_data %>%
+  summarise(
+    above_0.5 = sum(engagement_prob > 0.5)
+    #above_0.1 = sum(engagement_prob > 0.1)
+  )
+# # A tibble: 1 × 1
+#   above_0.5
+#       <int>
+# 1        30
+
+#table(brca_survival_data$engagement_group, brca_survival_data$os_status)
 # Non-Engager 208  38
 
 
@@ -1907,7 +1894,15 @@ table(brca_survival_data$engagement_group, brca_survival_data$os_status)
 ```
 
 ### Plot KM curves
+cut at 0.5 for the KM curves plot (coxph will be continuous and done separately)
 ```{r}
+
+brca_survival_data <- brca_survival_data %>%
+  mutate(engagement_group = factor(
+    if_else(engagement_prob > 0.5, "Engager", "Non-Engager"),
+    levels = c("Engager", "Non-Engager")
+  ))
+
 # See percentage of censored data
 brca_survival_data %>%
   group_by(engagement_group) %>%
@@ -1920,9 +1915,9 @@ brca_survival_data %>%
 
 # # A tibble: 2 × 5
 #   engagement_group total_n deaths censored percent_censored
-#   <chr>              <int>  <int>    <int>            <dbl>
-# 1 Engager              254     41      213             83.9
-# 2 Non-Engager          246     38      208             84.6
+#   <fct>              <int>  <int>    <int>            <dbl>
+# 1 Engager               30      5       25             83.3
+# 2 Non-Engager          982    144      838             85.3
 
 
 # 1. Fit the survival model using your existing variable name
@@ -1944,7 +1939,7 @@ brca_surv_plot <- ggsurvplot(
   xlab = "Time (Days)",
   ylab = "Survival Probability",
   
-  # Standardize legend position and labels
+  # legend position and labels
   legend = "top",
   legend.title = "Status",
   legend.labs = c("Engager", "Non-Engager"),
@@ -1954,13 +1949,77 @@ brca_surv_plot <- ggsurvplot(
   ggtheme = theme_minimal()
 )
 
-png("~/survival_analysis_plots/brca_survplot.png", width = 7, height = 7, units = "in", res = 300)
+png("~/gmm_grouping/survival/brca_survplot_gmm.png", width = 7, height = 7, units = "in", res = 300)
 print(brca_surv_plot)
 dev.off()
 
 ```
 
 ### CoxPH
+#### Continuous cox
+```{r}
+brca_cox_model <- coxph(
+  Surv(os_time, os_status) ~ engagement_prob + ajcc_pathologic_stage + age_at_index,
+  data = brca_survival_data
+)
+summary(brca_cox_model)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_prob + 
+#     ajcc_pathologic_stage + age_at_index, data = brca_survival_data)
+# 
+#   n= 960, number of events= 104 
+#    (52 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_prob                  5.495e-01  1.732e+00  6.708e-01  0.819   0.4127    
+# ajcc_pathologic_stageStage IA   -6.445e-01  5.249e-01  6.538e-01 -0.986   0.3242    
+# ajcc_pathologic_stageStage IB   -1.453e+01  4.878e-07  2.423e+03 -0.006   0.9952    
+# ajcc_pathologic_stageStage II    5.786e-01  1.784e+00  1.058e+00  0.547   0.5843    
+# ajcc_pathologic_stageStage IIA   1.598e-01  1.173e+00  3.606e-01  0.443   0.6577    
+# ajcc_pathologic_stageStage IIB   2.440e-01  1.276e+00  3.803e-01  0.641   0.5212    
+# ajcc_pathologic_stageStage IIIA  7.470e-01  2.111e+00  3.943e-01  1.895   0.0581 .  
+# ajcc_pathologic_stageStage IIIB  8.122e-01  2.253e+00  5.479e-01  1.483   0.1382    
+# ajcc_pathologic_stageStage IIIC  6.999e-01  2.014e+00  5.942e-01  1.178   0.2388    
+# ajcc_pathologic_stageStage IV    2.549e+00  1.279e+01  4.072e-01  6.259 3.88e-10 ***
+# ajcc_pathologic_stageStage X     7.106e-01  2.035e+00  7.761e-01  0.916   0.3599    
+# age_at_index                     3.775e-02  1.038e+00  8.408e-03  4.490 7.13e-06 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_prob                 1.732e+00  5.773e-01    0.4652     6.451
+# ajcc_pathologic_stageStage IA   5.249e-01  1.905e+00    0.1457     1.891
+# ajcc_pathologic_stageStage IB   4.878e-07  2.050e+06    0.0000       Inf
+# ajcc_pathologic_stageStage II   1.784e+00  5.607e-01    0.2244    14.177
+# ajcc_pathologic_stageStage IIA  1.173e+00  8.523e-01    0.5787     2.379
+# ajcc_pathologic_stageStage IIB  1.276e+00  7.835e-01    0.6056     2.690
+# ajcc_pathologic_stageStage IIIA 2.111e+00  4.738e-01    0.9746     4.571
+# ajcc_pathologic_stageStage IIIB 2.253e+00  4.439e-01    0.7698     6.593
+# ajcc_pathologic_stageStage IIIC 2.014e+00  4.966e-01    0.6283     6.453
+# ajcc_pathologic_stageStage IV   1.279e+01  7.818e-02    5.7577    28.413
+# ajcc_pathologic_stageStage X    2.035e+00  4.913e-01    0.4446     9.317
+# age_at_index                    1.038e+00  9.630e-01    1.0215     1.056
+# 
+# Concordance= 0.772  (se = 0.025 )
+# Likelihood ratio test= 74.33  on 12 df,   p=5e-11
+# Wald test            = 99.58  on 12 df,   p=7e-16
+# Score (logrank) test = 155  on 12 df,   p=<2e-16
+
+brca_survival_data$engagement_group <- relevel(
+  factor(brca_survival_data$engagement_group), ref = "Non-Engager"
+)
+
+brca_cox_grouped <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index,
+  data = brca_survival_data
+)
+summary(brca_cox_grouped)
+
+
+```
+
+#### IGNORE -- OLD, using quartile analysis code here where I used a quartile cutoff of probability scores. didn't delete but IGNORE
 with covariates
 ```{r}
 
