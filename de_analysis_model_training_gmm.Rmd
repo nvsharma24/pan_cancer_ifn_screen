@@ -875,14 +875,10 @@ brca_msigdb_hallmark_rigi_pathways_boxplot <- ggplot(brca_immune_long, aes(x = g
   ) +
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.3)
 
-ggsave("gmm_grouping/gsva/brca_msigdb_hallmark_rigi_pathways_boxplot.png", plot = brca_msigdb_hallmark_rigi_pathways_boxplot,
-       width = 7, height = 7, units = "in", dpi = 300)
+#ggsave("gmm_grouping/gsva/brca_msigdb_hallmark_rigi_pathways_boxplot.png", plot = brca_msigdb_hallmark_rigi_pathways_boxplot,
+#       width = 7, height = 7, units = "in", dpi = 300)
 
 # Check which samples score high in each rig-i set and whether they're the same. pull the sample scores for the two sets filtered on engager group
-# brca_immune_scores %>%
-#   filter(group == "engager") %>%
-#   select(case_id, rigi_ifn_induction, rlr_signaling, ifn_signaling) %>%
-#   arrange(desc(rigi_ifn_induction))
 
 brca_immune_scores %>%
   filter(group == "engager") %>%
@@ -1077,22 +1073,15 @@ model_results_list <- list()
 
 ## BRCA
 ```{r}
-brca_data_counts <- prepare_and_cache_rnaseq("BRCA", candidate_sample_groups)
 
-names(brca_data_counts)
-dim(brca_data_counts$counts)
 length(brca_deseq2_test$up_genes)
+# 104
 
 brca_vst_mat <- vst(brca_deseq2_test$dds, blind = TRUE)
 brca_vst_counts <- assay(brca_vst_mat)
 dim(brca_vst_counts)
-# [1] 39234    29
+# [1] 39322    30 - 39,322 genes and 30 samples
 
-# brca_vst_133 <- brca_vst_counts %>%
-#   as.data.frame() %>%
-#   rownames_to_column("gene_name") %>%
-#   filter(gene_name %in% brca_deseq2_test$up_genes) %>%
-#   column_to_rownames("gene_name")
 
 
 
@@ -1102,22 +1091,24 @@ gene_symbols <- brca_deseq2_test$res_df$gene_name[match(rownames(brca_vst_counts
 rownames(brca_vst_counts) <- gene_symbols
 
 
-# 2. Subset to the 133 genes (now that names match) and clean NAs
-brca_vst_133 <- brca_vst_counts[rownames(brca_vst_counts) %in% brca_deseq2_test$up_genes, ]
-brca_vst_133 <- brca_vst_133[!is.na(rownames(brca_vst_133)), ]
-dim(brca_vst_133)
+# 2. Subset to the 104 genes (now that names match) and clean NAs
+brca_vst_sig_de_genes <- brca_vst_counts[rownames(brca_vst_counts) %in% brca_deseq2_test$up_genes, ]
+brca_vst_sig_de_genes <- brca_vst_sig_de_genes[!is.na(rownames(brca_vst_sig_de_genes)), ]
+dim(brca_vst_sig_de_genes)
+# [1] 104  30
 
 # Align Labels and Run LOOCV______####
 
 # 3. Setup labels (Engager = 1, Non-Engager = 0) 
 # colData is already aligned to the matrix columns
 y <- ifelse(colData(brca_deseq2_test$dds)$engager_group == "engager", 1, 0)
-X <- t(brca_vst_133) # glmnet requires samples as rows
+X <- t(brca_vst_sig_de_genes) # glmnet requires samples as rows
 n_samples <- nrow(X)
 brca_predicted_probs <- numeric(n_samples)
 
-# LOOCV Loop for 133 genes____####
+# LOOCV Loop for 104 genes____####
 set.seed(42) # For reproducibility in cv.glmnet folds
+#set.seed(7) # Trying different seeds to test robusness
 for(i in 1:n_samples) {
   X_train <- X[-i, ]
   y_train <- y[-i]
@@ -1130,6 +1121,32 @@ for(i in 1:n_samples) {
   # Predict probability for the held-out sample
   brca_predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
 }
+
+# Changing up seeds to check for robustness of AUC and pearson corr values since the groups are imbalanced (see notes)
+seeds <- 1:50
+seed_results <- map_dfr(seeds, function(s) {
+  set.seed(s)
+  probs <- numeric(n_samples)
+  ok <- TRUE
+  for (i in 1:n_samples) {
+    fit <- tryCatch(
+      cv.glmnet(X[-i, ], y[-i], family = "binomial", alpha = 1, nfolds = 5),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) { ok <- FALSE; break }
+    probs[i] <- predict(fit, X[i, , drop = FALSE], s = "lambda.min", type = "response")
+  }
+  if (!ok) return(NULL)
+  tibble(seed = s,
+         auc = as.numeric(auc(roc(y, probs, quiet = TRUE))),
+         pearson = cor(probs, y))
+})
+
+seed_results %>% summarise(
+  auc_mean = mean(auc), auc_sd = sd(auc), auc_min = min(auc), auc_max = max(auc),
+  r_mean = mean(pearson), r_sd = sd(pearson)
+)
+
 
 # Evaluation and Plotting_____####
 
@@ -1155,7 +1172,7 @@ lasso_boxplot <- ggplot(model_results_list$brca, aes(x = true_label, y = pred_pr
   scale_fill_manual(values = c("blue", "red")) +
   scale_color_manual(values = c("blue", "red")) +
   labs(
-    title = paste0("BRCA LOOCV Across 133 DE Genes (AUC = ", round(auc_val, 3), ")"),
+    title = paste0("BRCA LOOCV Across ",length(brca_deseq2_test$up_genes), " DE Genes (AUC = ", round(auc_val, 3), ")"),
     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
     y = "Predicted Probability of Engager Status",
     x = NULL
@@ -1166,7 +1183,7 @@ lasso_boxplot <- ggplot(model_results_list$brca, aes(x = true_label, y = pred_pr
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
 ggsave(
-  filename = "model_plots/v2/brca_lasso_boxplot.png", 
+  filename = "gmm_grouping/model_plots/brca_lasso_boxplot_gmm.png", 
   plot = lasso_boxplot, 
   width = 5.5,      # Width in inches
   height = 5,     # Height in inches
