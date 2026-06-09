@@ -828,11 +828,12 @@ rownames(brca_vst_mat) <- brca_deseq2_test$res_df$gene_name[match(rownames(brca_
 brca_vst_mat <- brca_vst_mat[!is.na(rownames(brca_vst_mat)), ]
 
 # 3. Score the BRCA samples against ONLY these immune pathways
-brca_immune_gsva <- gsva(expr = brca_vst_mat, 
-                         gset.idx.list = target_pathways, 
-                         method = "gsva", 
+#gsva_par <- gsvaParam(exprData = brca_vst_mat, geneSets = target_pathways)
+brca_immune_gsva <- gsva(expr = brca_vst_mat,
+                         gset.idx.list = target_pathways,
+                         method = "gsva",
                          verbose = FALSE)
-
+#brca_immune_gsva <- gsva(gsva_par, verbose = FALSE)
 
 # 4. Format all three pathways into a dataframe
 brca_immune_scores <- data.frame(
@@ -877,7 +878,7 @@ brca_msigdb_hallmark_rigi_pathways_boxplot <- ggplot(brca_immune_long, aes(x = g
 
 #ggsave("gmm_grouping/gsva/brca_msigdb_hallmark_rigi_pathways_boxplot.png", plot = brca_msigdb_hallmark_rigi_pathways_boxplot,
 #       width = 7, height = 7, units = "in", dpi = 300)
-
+brca_msigdb_hallmark_rigi_pathways_boxplot
 # Check which samples score high in each rig-i set and whether they're the same. pull the sample scores for the two sets filtered on engager group
 
 brca_immune_scores %>%
@@ -939,7 +940,7 @@ coad_gsva_boxplot <- ggplot(coad_gsva_scores, aes(x = group, y = custom_metric, 
   # Refine labels and titles
   labs(
     title = "COAD: Sample-Level Gene Set Scoring",
-    subtitle = paste0("Based on ", length(brca_deseq2_test$up_genes), "-gene Signature"),
+    subtitle = paste0("Based on ", length(coad_deseq2_test$up_genes), "-gene Signature"),
     y = "GSVA Enrichment Score",
     x = NULL # Removing 'group' label as the axis categories make it obvious
   ) +
@@ -952,8 +953,8 @@ coad_gsva_boxplot <- ggplot(coad_gsva_scores, aes(x = group, y = custom_metric, 
   ) +
   stat_compare_means(method = "wilcox.test", label.x = 1.5, label.y = 0.6)
 
-ggsave("gmm_grouping/gsva/coad_gsva_boxplot.png", plot = coad_gsva_boxplot,
-       width = 5.5, height = 5, units = "in", dpi = 300)
+#ggsave("gmm_grouping/gsva/coad_gsva_boxplot.png", plot = coad_gsva_boxplot,
+#       width = 5.5, height = 5, units = "in", dpi = 300)
 
 #### MSigDB interrogation of immune pathways______####
 
@@ -1026,8 +1027,8 @@ coad_msigdb_hallmark_rigi_pathways_boxplot<- ggplot(coad_immune_long, aes(x = gr
   ) +
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.3)
 
-ggsave("gmm_grouping/gsva/coad_msigdb_hallmark_rigi_pathways_boxplot.png", plot = coad_msigdb_hallmark_rigi_pathways_boxplot,
-       width = 7, height = 7, units = "in", dpi = 300)
+#ggsave("gmm_grouping/gsva/coad_msigdb_hallmark_rigi_pathways_boxplot.png", plot = coad_msigdb_hallmark_rigi_pathways_boxplot,
+#       width = 7, height = 7, units = "in", dpi = 300)
 
 # Check which samples score high in each rig-i set and whether they're the same. pull the sample scores for the two sets filtered on engager group
 
@@ -1077,8 +1078,8 @@ model_results_list <- list()
 length(brca_deseq2_test$up_genes)
 # 104
 
-brca_vst_mat <- vst(brca_deseq2_test$dds, blind = TRUE)
-brca_vst_counts <- assay(brca_vst_mat)
+brca_vst_transform <- vst(brca_deseq2_test$dds, blind = TRUE)
+brca_vst_counts <- assay(brca_vst_transform)
 dim(brca_vst_counts)
 # [1] 39322    30 - 39,322 genes and 30 samples
 
@@ -1124,7 +1125,7 @@ for(i in 1:n_samples) {
 
 # Changing up seeds to check for robustness of AUC and pearson corr values since the groups are imbalanced (see notes)
 seeds <- 1:50
-seed_results <- map_dfr(seeds, function(s) {
+brca_seed_results <- map_dfr(seeds, function(s) {
   set.seed(s)
   probs <- numeric(n_samples)
   ok <- TRUE
@@ -1142,11 +1143,15 @@ seed_results <- map_dfr(seeds, function(s) {
          pearson = cor(probs, y))
 })
 
-seed_results %>% summarise(
+brca_seed_results %>% summarise(
   auc_mean = mean(auc), auc_sd = sd(auc), auc_min = min(auc), auc_max = max(auc),
   r_mean = mean(pearson), r_sd = sd(pearson)
 )
 
+# # A tibble: 1 × 6
+#   auc_mean auc_sd auc_min auc_max r_mean   r_sd
+#      <dbl>  <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
+# 1    0.934 0.0334   0.876       1  0.792 0.0207
 
 # Evaluation and Plotting_____####
 
@@ -1269,16 +1274,13 @@ ggsave(
 
 ## COAD
 ```{r}
-coad_data_counts <- prepare_and_cache_rnaseq("COAD", candidate_sample_groups)
 
-names(coad_data_counts)
-dim(coad_data_counts$counts)
-length(coad_deseq2_test$up_genes) # 26 up genes
+length(coad_deseq2_test$up_genes) # 57 up genes
 
-coad_vst_mat <- vst(coad_deseq2_test$dds, blind = TRUE)
-coad_vst_counts <- assay(coad_vst_mat)
+coad_vst_transform <- vst(coad_deseq2_test$dds, blind = TRUE)
+coad_vst_counts <- assay(coad_vst_transform)
 dim(coad_vst_counts)
-# [1] 33414    17
+# [1] 36728    32
 
 
 # 1. Map the Ensembl IDs in coad_vst_counts to symbols using res_df
@@ -1288,22 +1290,22 @@ rownames(coad_vst_counts) <- coad_gene_symbols
 
 
 # 2. Subset to the de genes (now that names match) and clean NAs
-coad_vst <- coad_vst_counts[rownames(coad_vst_counts) %in% coad_deseq2_test$up_genes, ]
-coad_vst <- coad_vst[!is.na(rownames(coad_vst)), ]
-dim(coad_vst)
-# [1] 26 17
+coad_vst_sig_de_genes <- coad_vst_counts[rownames(coad_vst_counts) %in% coad_deseq2_test$up_genes, ]
+coad_vst_sig_de_genes <- coad_vst_sig_de_genes[!is.na(rownames(coad_vst_sig_de_genes)), ]
+dim(coad_vst_sig_de_genes)
+# [1] 57 32
 
 # Align Labels and Run LOOCV______####
 
 # 3. Setup labels (Engager = 1, Non-Engager = 0) 
 # colData is already aligned to the matrix columns
 y <- ifelse(colData(coad_deseq2_test$dds)$engager_group == "engager", 1, 0)
-X <- t(coad_vst) # glmnet requires samples as rows
+X <- t(coad_vst_sig_de_genes) # glmnet requires samples as rows
 n_samples <- nrow(X)
 coad_predicted_probs <- numeric(n_samples)
 
-# LOOCV Loop for 26 genes____####
-set.seed(42) # For reproducibility in cv.glmnet folds
+# LOOCV Loop for sig de genes____####
+set.seed(7) # For reproducibility in cv.glmnet folds
 for(i in 1:n_samples) {
   X_train <- X[-i, ]
   y_train <- y[-i]
@@ -1316,6 +1318,31 @@ for(i in 1:n_samples) {
   # Predict probability for the held-out sample
   coad_predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
 }
+
+seeds <- 1:50
+coad_seed_results <- map_dfr(seeds, function(s) {
+  set.seed(s)
+  probs <- numeric(n_samples)
+  ok <- TRUE
+  for (i in 1:n_samples) {
+    fit <- tryCatch(
+      cv.glmnet(X[-i, ], y[-i], family = "binomial", alpha = 1, nfolds = 5),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) { ok <- FALSE; break }
+    probs[i] <- predict(fit, X[i, , drop = FALSE], s = "lambda.min", type = "response")
+  }
+  if (!ok) return(NULL)
+  tibble(seed = s, auc = as.numeric(auc(roc(y, probs, quiet = TRUE))), pearson = cor(probs, y))
+})
+
+coad_seed_results %>% summarise(
+  auc_mean = mean(auc), auc_sd = sd(auc), auc_min = min(auc), auc_max = max(auc),
+  r_mean = mean(pearson), r_sd = sd(pearson)
+)
+#  auc_mean auc_sd auc_min auc_max r_mean   r_sd
+#      <dbl>  <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
+# 1    0.902 0.0389   0.821   0.968  0.657 0.0631
 
 # Evaluation and Plotting_____####
 
@@ -1339,7 +1366,7 @@ lasso_boxplot <- ggplot(model_results_list$coad, aes(x = true_label, y = pred_pr
   scale_fill_manual(values = c("Non-Engager" = "#4575b4", "Engager" = "#d73027")) +
   scale_color_manual(values = c("Non-Engager" = "#4575b4", "Engager" = "#d73027")) +
   labs(
-    title = paste0("COAD LOOCV Across 26 DE Genes (AUC = ", round(auc_val, 3), ")"),
+    title = paste0("COAD LOOCV Across ", length(coad_deseq2_test$up_genes), " DE Genes (AUC = ", round(auc_val, 3), ")"),
     subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
     y = "Predicted Probability of Engager Status",
     x = NULL
@@ -1350,7 +1377,7 @@ lasso_boxplot <- ggplot(model_results_list$coad, aes(x = true_label, y = pred_pr
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
 ggsave(
-  filename = "model_plots/v2/coad_lasso_boxplot.png", 
+  filename = "gmm_grouping/model_plots/coad_lasso_boxplot.png", 
   plot = lasso_boxplot, 
   width = 5.5,      # Width in inches
   height = 5,     # Height in inches
@@ -1360,7 +1387,7 @@ ggsave(
 
 
 
-# AUC Plot
+# ROC curve
 # Calculate the ROC object
 # Ensures "Engager" is treated as the positive class
 roc_obj <- roc(model_results_list$coad$true_label, model_results_list$coad$pred_prob, levels = c("Non-Engager", "Engager"))
@@ -1378,15 +1405,15 @@ roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
   theme_minimal() +
   labs(
-    title = "ROC Curve: COAD LOOCV Across 26 Genes",
+    title = paste0("ROC Curve: COAD LOOCV Across ", length(coad_deseq2_test$up_genes), " Genes"),
     subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
-    x = "False Positive Rate (1 - Specificity)",
-    y = "True Positive Rate (Sensitivity)"
+    x = "False Positive Rate",
+    y = "True Positive Rate"
   ) +
   theme(plot.title = element_text(face = "bold"))
 
 ggsave(
-  filename = "model_plots/v2/coad_lasso_roc_curve.png", 
+  filename = "gmm_grouping/model_plots/coad_lasso_roc_curve.png", 
   plot = roc_plot, 
   width = 6,      # Width in inches
   height = 5,     # Height in inches
@@ -1413,7 +1440,7 @@ pr_plot <- as.data.frame(coad_pr_obj$curve) %>%
   geom_path(color = "blue", linewidth = 1) + 
   theme_minimal() +
   labs(
-    title = "Precision-Recall Curve: COAD LOOCV Across 26 DE Genes",
+    title = paste0("Precision-Recall Curve: COAD LOOCV Across ", length(coad_deseq2_test$up_genes), " DE Genes"),
     subtitle = paste0("PR AUC = ", round(coad_pr_obj$auc.integral, 3)),
     x = "Recall (True Positive Rate)",
     y = "Precision (Positive Predictive Value)"
@@ -1425,9 +1452,9 @@ pr_plot <- as.data.frame(coad_pr_obj$curve) %>%
   )
 
 ggsave(
-  filename = "model_plots/v2/coad_lasso_pr_curve.png", 
+  filename = "gmm_grouping/model_plots/coad_lasso_pr_curve.png", 
   plot = pr_plot, 
-  width = 6,      # Width in inches
+  width = 7,      # Width in inches
   height = 5,     # Height in inches
   units = "in",
   dpi = 300       # 300 DPI is the print standard
@@ -1675,7 +1702,7 @@ rm(coad_clinical_check)
 ```
 
 ### vst normalize 
-To make sure gene expression values are the same scale as the N=17 training set
+To make sure gene expression values are the same scale as the N=32 training set
 ```{r}
 # 1. Create the DESeq container for the full cohort
 coad_dds_full <- DESeqDataSetFromMatrix(
@@ -1689,20 +1716,20 @@ coad_vst_full <- vst(coad_dds_full, blind = TRUE)
 coad_mat_full <- assay(coad_vst_full)
 
 # 3. Map Gene IDs to Symbols
-# Ensuring the rownames match your 133-gene model (e.g., RAP2C)
+# Ensuring the rownames match 57 sig de genes 
 rownames(coad_mat_full) <- rowData(coad_full_data$se)$gene_name[match(rownames(coad_mat_full), rowData(coad_full_data$se)$gene_id)]
 ```
 
 ### Get final model
 train on all 17 samples now that we know that the de genes are useful for predicting engager/non-engager status from the training set
 ```{r}
-# 1. Train the Master Model on all 17 Discovery Samples
-coad_x_train <- t(coad_vst) 
+# 1. Train the Master Model on all 32 Discovery Samples
+coad_x_train_sig_de_genes <- t(coad_vst_sig_de_genes) 
 coad_y_labels <- y               
 
 set.seed(42)
-coad_model_final <- cv.glmnet(
-    x = coad_x_train, 
+coad_model_sig_de_genes_final <- cv.glmnet(
+    x = coad_x_train_sig_de_genes, 
     y = coad_y_labels, 
     family = "binomial", 
     alpha = 1, 
@@ -1710,19 +1737,20 @@ coad_model_final <- cv.glmnet(
 )
 
 # 2. Extract the non-zero active weights for reference
-coad_final_weights <- as.matrix(coef(coad_model_final, s = "lambda.min"))
+coad_final_weights <- as.matrix(coef(coad_model_sig_de_genes_final, s = "lambda.min"))
 coad_active_genes <- coad_final_weights[coad_final_weights[, 1] != 0, , drop = FALSE]
 print(coad_active_genes) 
 
-#              lambda.min
-# (Intercept) -19.10543555
-# CCDC175       0.46150323
-# ZNF572        0.54155029
-# FAM181B       0.08039022
-# DRICH1        0.47364495
-# PDPK2P        1.01272774
-# EOLA1-DT      0.39995442
-# CHMP1B2P      0.51472922
+#               lambda.min
+# (Intercept) -28.04799122
+# KIF20A        0.28615708
+# SLCO1B1       0.02209004
+# MFSD9         0.46172705
+# SAP130        0.75316390
+# POU4F1        0.92415892
+# SLCO4C1       0.13271767
+# NCAPD2P1      0.95018120
+# RAMACL        0.21975924
 
 # Save as tsv
 coad_active_genes %>% 
@@ -1731,7 +1759,7 @@ coad_active_genes %>%
   mutate(gene_symbol = rownames(.)) %>% 
   select(gene_symbol, coefficient) %>% 
   arrange(desc(abs(coefficient))) %>% 
-  write_tsv("~/model_plots/v2/coad_lasso_gene_signature.tsv")
+  write_tsv("gmm_grouping/model_plots/coad_lasso_gene_signature_gmm.tsv")
 
 # Get genes and weights ####
 coad_gene_signature_table <- coad_active_genes %>% 
@@ -1743,8 +1771,8 @@ coad_gene_signature_table <- coad_active_genes %>%
   # Make table
   gt() %>%
   tab_header(
-    title = "COAD 26-Gene LASSO Signature Coefficients",
-    subtitle = "Selected from 133 Candidate DE Genes (BRCA Cohort)"
+    title = paste0("COAD ", nrow(coad_active_genes)-1,"-Gene LASSO Signature Coefficients"),
+    subtitle = paste0("Selected from ",length(coad_deseq2_test$up_genes), " Candidate DE Genes (BRCA Cohort)")
   ) %>%
   cols_label(
     gene_symbol = "Gene Symbol",
@@ -1768,12 +1796,12 @@ coad_gene_signature_table
 
 
 # 3. Align the Validation Samples
-target_genes <- rownames(coad_vst)
+target_genes <- rownames(coad_vst_sig_de_genes)
 available_genes <- rownames(coad_mat_full)
 
 missing_genes <- setdiff(target_genes, available_genes)
 print(paste("Missing genes:", paste(missing_genes, collapse=", ")))
-# [1] "Missing genes: EOLA1-DT, LOC105379362"
+# [1] "Missing genes: LOC105373383, LOC100506207"
 
 # 1. Extract the genes we DO have, transpose to patients-as-rows ####
 available_data <- coad_mat_full[rownames(coad_mat_full) %in% target_genes, ] %>% 
@@ -1788,38 +1816,38 @@ if(length(missing_genes) > 0) {
     dimnames = list(rownames(available_data), missing_genes)
   )
   # 3. Bind them together and forcefully reorder columns to match the discovery set exactly ####
-  coad_x_val <- cbind(available_data, missing_data)[, target_genes]
+  coad_x_val_sig_de_genes <- cbind(available_data, missing_data)[, target_genes]
 } else {
-  coad_x_val <- available_data[, target_genes]
+  coad_x_val_sig_de_genes <- available_data[, target_genes]
 }
 
 # Confirm dimensions 
-dim(coad_x_val)
-# [1] 458  26
+dim(coad_x_val_sig_de_genes)
+# [1] 458  57
 
 # Clean up temporary debugging variables
 rm(target_genes, available_genes, missing_genes, available_data)
 if(exists("missing_data")) rm(missing_data)
 
 # 4. Generate the Engagement Probabilities ####
-coad_final_probs <- predict(
-  coad_model_final, 
-  newx = coad_x_val, 
+coad_final_probs_sig_de_genes <- predict(
+  coad_model_sig_de_genes_final, 
+  newx = coad_x_val_sig_de_genes, 
   s = "lambda.min", 
   type = "response"
 )
 
 # 5. Consolidate into a clean, tidy tibble ####
 coad_engagement_scores <- tibble(
-  case_id = rownames(coad_final_probs),
-  engagement_prob = as.numeric(coad_final_probs)
+  case_id = rownames(coad_final_probs_sig_de_genes),
+  engagement_prob = as.numeric(coad_final_probs_sig_de_genes)
 )
 
 # 6. Sanity Check ####
 summary(coad_engagement_scores$engagement_prob)
-#> dim(coad_x_val)
-#    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
-# 0.003887 0.045553 0.102098 0.160451 0.231534 0.912739 
+# > summary(coad_engagement_scores$engagement_prob)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.01064 0.07856 0.13764 0.20731 0.26790 0.94466 
 ```
 
 ### Histogram and density plot of engager status probabilities to see if there are multiple populations
@@ -1834,6 +1862,25 @@ ggplot(coad_engagement_scores, aes(x = engagement_prob)) +
     x = "Probability of Engager Status",
     y = "Density"
   )
+
+coad_engagement_scores %>%
+  mutate(bin = cut(engagement_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
+  count(bin)
+
+coad_engagement_scores %>%
+  summarise(
+    n_total = n(),
+    n_above_0.5 = sum(engagement_prob > 0.5),
+    n_above_0.25 = sum(engagement_prob > 0.25)
+  )
+
+#  A tibble: 1 × 3
+#   n_total n_above_0.5 n_above_0.25
+#     <int>       <int>        <int>
+# 1     458          39          121
+
+coad_engagement_scores %>% summarise(n_above_0.5 = sum(engagement_prob > 0.5))
+# 39 above 0.5
 ```
 
 
@@ -2315,48 +2362,73 @@ Get poopulations by taking the top and bottom quartiles
 ```{r}
 
 # 1. Define the 25% (quartile) cutoffs
-lower_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.25)
-upper_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.75)
+# lower_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.25)
+# upper_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.75)
 
 # 2. Isolate extremes, strictly filter for primary tumors, and merge
+# coad_survival_data <- coad_engagement_scores %>%
+#   filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
+#   mutate(
+#     engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
+#     patient_id = substr(case_id, 1, 12),
+#     sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
+#   ) %>%
+#   # Safeguard 1: Strictly keep only Primary Solid Tumors ("01")
+#   filter(sample_type == "01") %>%
+#   # Safeguard 2: Now safely drop replicate vials (A vs B)
+#   distinct(patient_id, .keep_all = TRUE) %>%
+#   
+#   # Join and build survival variables
+#   inner_join(
+#     coad_clinical %>% distinct(submitter_id, .keep_all = TRUE), 
+#     by = c("patient_id" = "submitter_id")
+#   ) %>%
+#   mutate(
+#     os_time = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
+#     os_status = if_else(vital_status == "Dead", 1, 0)
+#   ) %>%
+#   filter(!is.na(os_time) & os_time > 0 & !is.na(os_status))
+
 coad_survival_data <- coad_engagement_scores %>%
-  filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
   mutate(
-    engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
-    patient_id = substr(case_id, 1, 12),
-    sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
+    patient_id  = substr(case_id, 1, 12),
+    sample_type = substr(case_id, 14, 15)
   ) %>%
-  # Safeguard 1: Strictly keep only Primary Solid Tumors ("01")
   filter(sample_type == "01") %>%
-  # Safeguard 2: Now safely drop replicate vials (A vs B)
   distinct(patient_id, .keep_all = TRUE) %>%
-  
-  # Join and build survival variables
   inner_join(
-    coad_clinical %>% distinct(submitter_id, .keep_all = TRUE), 
+    coad_clinical %>% distinct(submitter_id, .keep_all = TRUE),
     by = c("patient_id" = "submitter_id")
   ) %>%
   mutate(
-    os_time = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
+    os_time   = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
     os_status = if_else(vital_status == "Dead", 1, 0)
   ) %>%
   filter(!is.na(os_time) & os_time > 0 & !is.na(os_status))
 
 # 3. Verify the final dataset
 dim(coad_survival_data)
-#  [1] 192 114
+#  [1] 389 113
 
-table(coad_survival_data$engagement_group, coad_survival_data$os_status)
-# Non-Engager 
-  #            0  1
-  # Engager     71 30
-  # Non-Engager 67 24
+coad_survival_data %>% summarise(above_0.5 = sum(engagement_prob > 0.5))
+# # A tibble: 1 × 1
+#   above_0.5
+#       <int>
+# 1        33
+
 
 
 ```
 
 ### Plot KM curves
 ```{r}
+
+coad_survival_data <- coad_survival_data %>%
+  mutate(engagement_group = factor(
+    if_else(engagement_prob > 0.5, "Engager", "Non-Engager"),
+    levels = c("Engager", "Non-Engager")
+  ))
+
 # See percentage of censored data
 coad_survival_data %>%
   group_by(engagement_group) %>%
@@ -2367,11 +2439,11 @@ coad_survival_data %>%
     percent_censored = round((censored / total_n) * 100, 1)
   )
 
-# # A tibble: 2 × 5
-# engagement_group total_n deaths censored percent_censored
-#   <chr>              <int>  <int>    <int>            <dbl>
-# 1 Engager              101     30       71             70.3
-# 2 Non-Engager           91     24       67             73.6
+# A tibble: 2 × 5
+#   engagement_group total_n deaths censored percent_censored
+#   <fct>              <int>  <int>    <int>            <dbl>
+# 1 Engager               33     12       21             63.6
+# 2 Non-Engager          356     83      273             76.7
 
 
 # 1. Fit the survival model using your existing variable name
@@ -2389,7 +2461,7 @@ coad_surv_plot <- ggsurvplot(
   pval = TRUE,
   risk.table = TRUE,
   palette = c("#E41A1C", "#377EB8"), 
-  title = "COAD Overall Survival: Top vs Bottom Quartile",
+  title = "COAD Overall Survival: Engager (prob > 0.5) vs Non-Engager",
   xlab = "Time (Days)",
   ylab = "Survival Probability",
   
@@ -2403,7 +2475,7 @@ coad_surv_plot <- ggsurvplot(
   ggtheme = theme_minimal()
 )
 
-png("~/survival_analysis_plots/coad_survplot.png", width = 7, height = 7, units = "in", res = 300)
+png("gmm_grouping/survival/coad_survplot_gmm.png", width = 10, height = 7, units = "in", res = 300)
 print(coad_surv_plot)
 dev.off()
 ```
@@ -2413,60 +2485,121 @@ with covariates
 ```{r}
 
 # Force Non-Engager to be the reference group (baseline)
-coad_survival_data$engagement_group <- relevel(factor(coad_survival_data$engagement_group), ref = "Non-Engager")
+# coad_survival_data$engagement_group <- relevel(factor(coad_survival_data$engagement_group), ref = "Non-Engager")
 
 # 1. Fit a Multivariate Cox Model
 # include clinical factors
+# coad_cox_model <- coxph(
+#   Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index, 
+#   data = coad_survival_data
+# )
+
+# Continuous Cox model
 coad_cox_model <- coxph(
-  Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index, 
+  Surv(os_time, os_status) ~ engagement_prob + ajcc_pathologic_stage + age_at_index,
   data = coad_survival_data
 )
-
-# 2. Look at the result
 summary(coad_cox_model)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_prob + 
+#     ajcc_pathologic_stage + age_at_index, data = coad_survival_data)
+# 
+#   n= 349, number of events= 61 
+#    (40 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_prob                  1.059e+00  2.883e+00  5.460e-01  1.939 0.052529 .  
+# ajcc_pathologic_stageStage IA   -1.383e+01  9.825e-07  8.583e+03 -0.002 0.998714    
+# ajcc_pathologic_stageStage II    1.134e+00  3.107e+00  7.162e-01  1.583 0.113443    
+# ajcc_pathologic_stageStage IIA   4.008e-01  1.493e+00  6.632e-01  0.604 0.545562    
+# ajcc_pathologic_stageStage IIB   1.550e+00  4.712e+00  9.149e-01  1.694 0.090187 .  
+# ajcc_pathologic_stageStage III   1.704e+00  5.498e+00  7.673e-01  2.221 0.026338 *  
+# ajcc_pathologic_stageStage IIIA -1.495e+01  3.230e-07  3.449e+03 -0.004 0.996542    
+# ajcc_pathologic_stageStage IIIB  6.934e-01  2.000e+00  7.339e-01  0.945 0.344795    
+# ajcc_pathologic_stageStage IIIC  1.602e+00  4.962e+00  6.792e-01  2.358 0.018364 *  
+# ajcc_pathologic_stageStage IV    2.793e+00  1.633e+01  6.319e-01  4.420 9.86e-06 ***
+# ajcc_pathologic_stageStage IVA   2.419e+00  1.123e+01  7.430e-01  3.255 0.001133 ** 
+# ajcc_pathologic_stageStage IVB  -1.456e+01  4.749e-07  8.894e+03 -0.002 0.998694    
+# age_at_index                     4.468e-02  1.046e+00  1.313e-02  3.402 0.000668 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_prob                 2.883e+00  3.469e-01    0.9885     8.406
+# ajcc_pathologic_stageStage IA   9.825e-07  1.018e+06    0.0000       Inf
+# ajcc_pathologic_stageStage II   3.107e+00  3.218e-01    0.7633    12.648
+# ajcc_pathologic_stageStage IIA  1.493e+00  6.698e-01    0.4070     5.477
+# ajcc_pathologic_stageStage IIB  4.712e+00  2.122e-01    0.7843    28.311
+# ajcc_pathologic_stageStage III  5.498e+00  1.819e-01    1.2219    24.739
+# ajcc_pathologic_stageStage IIIA 3.230e-07  3.096e+06    0.0000       Inf
+# ajcc_pathologic_stageStage IIIB 2.000e+00  4.999e-01    0.4747     8.431
+# ajcc_pathologic_stageStage IIIC 4.962e+00  2.015e-01    1.3106    18.784
+# ajcc_pathologic_stageStage IV   1.633e+01  6.123e-02    4.7333    56.349
+# ajcc_pathologic_stageStage IVA  1.123e+01  8.904e-02    2.6181    48.182
+# ajcc_pathologic_stageStage IVB  4.749e-07  2.106e+06    0.0000       Inf
+# age_at_index                    1.046e+00  9.563e-01    1.0191     1.073
+# 
+# Concordance= 0.802  (se = 0.031 )
+# Likelihood ratio test= 70.55  on 13 df,   p=6e-10
+# Wald test            = 70.74  on 13 df,   p=6e-10
+# Score (logrank) test = 102.9  on 13 df,   p=5e-16
+# 
+
+
+# Now the coxph with the cutoff at 0.5
+coad_survival_data$engagement_group <- relevel(
+  factor(coad_survival_data$engagement_group), ref = "Non-Engager"
+)
+coad_cox_grouped_by_cutoff <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index,
+  data = coad_survival_data
+)
+summary(coad_cox_grouped_by_cutoff)
 
 # Call:
 # coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
 #     ajcc_pathologic_stage + age_at_index, data = coad_survival_data)
 # 
-#   n= 172, number of events= 37 
-#    (20 observations deleted due to missingness)
+#   n= 349, number of events= 61 
+#    (40 observations deleted due to missingness)
 # 
 #                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
-# engagement_groupEngager         -8.464e-02  9.188e-01  3.484e-01 -0.243  0.80804    
-# ajcc_pathologic_stageStage II    4.861e-01  1.626e+00  8.425e-01  0.577  0.56395    
-# ajcc_pathologic_stageStage IIA   1.829e-01  1.201e+00  6.851e-01  0.267  0.78951    
-# ajcc_pathologic_stageStage IIB   9.664e-01  2.629e+00  9.238e-01  1.046  0.29550    
-# ajcc_pathologic_stageStage III   1.259e+00  3.520e+00  9.336e-01  1.348  0.17761    
-# ajcc_pathologic_stageStage IIIA -1.507e+01  2.844e-07  4.387e+03 -0.003  0.99726    
-# ajcc_pathologic_stageStage IIIB -1.399e-01  8.694e-01  8.311e-01 -0.168  0.86629    
-# ajcc_pathologic_stageStage IIIC  1.228e+00  3.415e+00  7.088e-01  1.733  0.08311 .  
-# ajcc_pathologic_stageStage IV    2.039e+00  7.685e+00  6.833e-01  2.985  0.00284 ** 
-# ajcc_pathologic_stageStage IVA   2.554e+00  1.286e+01  9.679e-01  2.638  0.00833 ** 
-# ajcc_pathologic_stageStage IVB  -1.456e+01  4.773e-07  7.280e+03 -0.002  0.99840    
-# age_at_index                     8.409e-02  1.088e+00  2.047e-02  4.108 3.99e-05 ***
+# engagement_groupEngager          8.373e-01  2.310e+00  3.610e-01  2.320  0.02035 *  
+# ajcc_pathologic_stageStage IA   -1.389e+01  9.237e-07  8.611e+03 -0.002  0.99871    
+# ajcc_pathologic_stageStage II    1.197e+00  3.311e+00  7.161e-01  1.672  0.09458 .  
+# ajcc_pathologic_stageStage IIA   4.020e-01  1.495e+00  6.631e-01  0.606  0.54437    
+# ajcc_pathologic_stageStage IIB   1.513e+00  4.541e+00  9.151e-01  1.654  0.09822 .  
+# ajcc_pathologic_stageStage III   1.787e+00  5.971e+00  7.678e-01  2.327  0.01995 *  
+# ajcc_pathologic_stageStage IIIA -1.503e+01  2.973e-07  3.433e+03 -0.004  0.99651    
+# ajcc_pathologic_stageStage IIIB  7.079e-01  2.030e+00  7.337e-01  0.965  0.33460    
+# ajcc_pathologic_stageStage IIIC  1.608e+00  4.992e+00  6.793e-01  2.367  0.01793 *  
+# ajcc_pathologic_stageStage IV    2.826e+00  1.688e+01  6.285e-01  4.496 6.91e-06 ***
+# ajcc_pathologic_stageStage IVA   2.400e+00  1.102e+01  7.433e-01  3.228  0.00124 ** 
+# ajcc_pathologic_stageStage IVB  -1.459e+01  4.602e-07  8.925e+03 -0.002  0.99870    
+# age_at_index                     4.367e-02  1.045e+00  1.304e-02  3.349  0.00081 ***
 # ---
 # Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
 # 
 #                                 exp(coef) exp(-coef) lower .95 upper .95
-# engagement_groupEngager         9.188e-01  1.088e+00    0.4642     1.819
-# ajcc_pathologic_stageStage II   1.626e+00  6.150e-01    0.3119     8.477
-# ajcc_pathologic_stageStage IIA  1.201e+00  8.329e-01    0.3135     4.598
-# ajcc_pathologic_stageStage IIB  2.629e+00  3.804e-01    0.4299    16.072
-# ajcc_pathologic_stageStage III  3.520e+00  2.841e-01    0.5649    21.941
-# ajcc_pathologic_stageStage IIIA 2.844e-07  3.516e+06    0.0000       Inf
-# ajcc_pathologic_stageStage IIIB 8.694e-01  1.150e+00    0.1705     4.433
-# ajcc_pathologic_stageStage IIIC 3.415e+00  2.928e-01    0.8513    13.700
-# ajcc_pathologic_stageStage IV   7.685e+00  1.301e-01    2.0139    29.326
-# ajcc_pathologic_stageStage IVA  1.286e+01  7.779e-02    1.9285    85.703
-# ajcc_pathologic_stageStage IVB  4.773e-07  2.095e+06    0.0000       Inf
-# age_at_index                    1.088e+00  9.193e-01    1.0450     1.132
+# engagement_groupEngager         2.310e+00  4.329e-01    1.1387     4.687
+# ajcc_pathologic_stageStage IA   9.237e-07  1.083e+06    0.0000       Inf
+# ajcc_pathologic_stageStage II   3.311e+00  3.021e-01    0.8135    13.473
+# ajcc_pathologic_stageStage IIA  1.495e+00  6.690e-01    0.4075     5.482
+# ajcc_pathologic_stageStage IIB  4.541e+00  2.202e-01    0.7555    27.295
+# ajcc_pathologic_stageStage III  5.971e+00  1.675e-01    1.3258    26.894
+# ajcc_pathologic_stageStage IIIA 2.973e-07  3.364e+06    0.0000       Inf
+# ajcc_pathologic_stageStage IIIB 2.030e+00  4.927e-01    0.4819     8.549
+# ajcc_pathologic_stageStage IIIC 4.992e+00  2.003e-01    1.3186    18.902
+# ajcc_pathologic_stageStage IV   1.688e+01  5.924e-02    4.9245    57.858
+# ajcc_pathologic_stageStage IVA  1.102e+01  9.075e-02    2.5672    47.297
+# ajcc_pathologic_stageStage IVB  4.602e-07  2.173e+06    0.0000       Inf
+# age_at_index                    1.045e+00  9.573e-01    1.0183     1.072
 # 
-# Concordance= 0.776  (se = 0.043 )
-# Likelihood ratio test= 43.54  on 12 df,   p=2e-05
-# Wald test            = 37.56  on 12 df,   p=2e-04
-# Score (logrank) test = 48.49  on 12 df,   p=3e-06
-
+# Concordance= 0.804  (se = 0.031 )
+# Likelihood ratio test= 71.75  on 13 df,   p=4e-10
+# Wald test            = 72.32  on 13 df,   p=3e-10
+# Score (logrank) test = 105.4  on 13 df,   p=<2e-16
 ```
 
 
