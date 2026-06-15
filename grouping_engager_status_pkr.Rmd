@@ -1,0 +1,390 @@
+---
+title: "grouping_engager_status_pkr.Rmd"
+output: html_document
+date: "2026-06-03"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = "hide")
+
+
+```
+
+```{r packages}
+install.packages("BiocManager")
+BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+BiocManager::install("sesameData")
+BiocManager::install("sesame")
+BiocManager::install("sesame")
+BiocManager::install("edgeR")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("DESeq2")
+BiocManager::install("apeglm", update = FALSE, ask = FALSE)
+BiocManager::install("survminer")
+BiocManager::install(c("BiocGenerics", "S4Vectors", "IRanges"), force = TRUE, update = TRUE, ask = FALSE)
+BiocManager::install("DESeq2", force=TRUE, update = FALSE, ask = FALSE)
+
+install.packages("nloptr")
+install.packages("ggpubr")
+install.packages("cowplot")
+install.packages("gt")
+install.packages("minifi")
+install.packages("glmnet")
+install.packages("ggrepel")
+BiocManager::install("clusterProfiler")
+install.packages("msigdbr")
+install.packages("mclust")
+install.packages("conflicted")
+
+BiocManager::install("ComplexHeatmap")
+
+```
+
+
+```{r load packages}
+library(BiocManager)
+library(TCGAbiolinks)
+library(GSVA)
+library(SummarizedExperiment)
+library(tidyverse)
+library(nloptr)
+library(ggpubr)
+library(cowplot)
+library(gt)
+library(webshot2)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(sesameData)
+library(sesame)
+library(edgeR)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(S4Vectors)
+library(IRanges)
+library(DESeq2)
+library(apeglm)
+library(clusterProfiler)
+library(msigdbr)
+library(glmnet)
+library(survminer)
+library(ggrepel)
+library(mclust)
+library(conflicted)
+library(ComplexHeatmap)
+
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("count", "dplyr")
+conflict_prefer("filter", "dplyr")
+```
+1) filter the compilation file to the loci that are denoted pkr_enrichment == TRUE. these are the loci that are accessible (not necessarily transcribed by pol3 but could be pol2 anything, agnostic to pol3) and have pkr enrichment.
+2) these loci also have tcga sample identifiers so i tie the pkr_enrichment column to the compilation dataframe only keeping pkr_enriched loci
+3) filter by p-values with the assumption that if it is open, dsRNA is being transcribed and "engages" with pkr. 
+4) cluster p-values into 3 groups just like previous analysis, and do the same downstream
+
+# Read in coordinate file of pkr enriched loci and pol3 genomic ranges 
+Look for overlap of 
+```{r}
+pkr_loci <-read_csv("~/real.pkr.csv") 
+View(pkr_loci)
+
+# All RNA central loci with pvalues of atacseq counts ("accessibility")
+# Should have 1409 rows (loci) that overlap with identifiers in the complication file
+pkr_accessibility_pvals <- read_csv("ATAC_TCGA_Compilation_pValue_Gene_Downgraded_FINAL.txt") %>% 
+  filter(V1 %in% pkr_loci$identifier)
+```
+
+# transform p-vals, restrict to candidate cancers
+```{r}
+pkr_accessibility_pvals_long <- pkr_accessibility_pvals %>% 
+  pivot_longer(
+  cols = starts_with("TCGA"),
+  names_to = "sample",
+  values_to = "pval") %>% 
+  mutate(
+    cancer_type = str_extract(sample, "(?<=TCGA\\.)[A-Z]+"),
+    pval = as.numeric(pval),
+    sample = str_remove(sample,"^TCGA\\." )
+  )
+
+pkr_accessibility_pvals_wide <- pkr_accessibility_pvals_long %>% 
+  pivot_wider(
+    names_from = V1,
+    values_from = pval
+  )
+
+dim(pkr_accessibility_pvals_wide)
+# [1] 328 1411 -- 328 samples and 1411 columns (1409 locus columns plus sample and cancer_type) 
+
+# Transform pvals for clustering
+engager_loci_pvals <- pkr_accessibility_pvals_wide %>% 
+  mutate(across(where(is.numeric), ~ -log10(. + 1e-300)))
+
+
+# Get only candidate cancers
+engager_loci_pvals_candidate_cancers <- engager_loci_pvals %>% 
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA"))
+
+# seeing how many samples are in each cancer type
+engager_loci_pvals_candidate_cancers %>% 
+  count(cancer_type) %>% 
+  arrange(n) 
+
+# # A tibble: 6 × 2
+#   cancer_type     n
+#   <chr>       <int>
+# 1 BLCA            8
+# 2 KIRC           11
+# 3 STAD           16
+# 4 KIRP           33
+# 5 COAD           36
+# 6 BRCA           57
+
+
+```
+
+# GMM
+```{r}
+gmm_results_by_cancer <- engager_loci_pvals_candidate_cancers %>%
+  group_by(cancer_type) %>%
+  group_split() %>%
+  map_dfr(function(df) {
+    
+    ct <- unique(df$cancer_type)
+    samples <- df$sample
+    
+    fit <- df %>%
+      dplyr::select(-sample, -cancer_type) %>%
+      Mclust(G = 3)
+    
+    tibble(
+      sample = samples,
+      cancer_type = ct,
+      cluster = fit$classification,
+      prob_cluster1 = fit$z[, 1],
+      prob_cluster2 = fit$z[, 2],
+      prob_cluster3 = fit$z[, 3]
+    )
+  })
+
+gmm_results_by_cancer %>%
+  count(cancer_type, cluster)
+
+# A tibble: 18 × 3
+#    cancer_type cluster     n
+#    <chr>         <dbl> <int>
+#  1 BLCA              1     1
+#  2 BLCA              2     6
+#  3 BLCA              3     1
+#  4 BRCA              1    53
+#  5 BRCA              2     3
+#  6 BRCA              3     1
+#  7 COAD              1    26
+#  8 COAD              2     9
+#  9 COAD              3     1
+# 10 KIRC              1     9
+# 11 KIRC              2     1
+# 12 KIRC              3     1
+# 13 KIRP              1    10
+# 14 KIRP              2    22
+# 15 KIRP              3     1
+# 16 STAD              1    14
+# 17 STAD              2     1
+# 18 STAD              3     1
+
+
+# Looks weird so looking at distribution of transformed p-vals for each cancer type
+engager_loci_pvals_candidate_cancers %>%
+  pivot_longer(cols = where(is.numeric), names_to = "locus", values_to = "val") %>%
+  ggplot(aes(x = cancer_type, y = val, fill = cancer_type)) +
+  geom_violin() +
+  theme_minimal() +
+  labs(y = "-log10(p)", x = NULL) +
+  theme(legend.position = "none")
+
+engager_loci_pvals_candidate_cancers %>%
+  pivot_longer(cols = where(is.numeric), names_to = "locus", values_to = "val") %>%
+  group_by(cancer_type) %>%
+  summarise(
+    min = min(val),
+    q25 = quantile(val, 0.25),
+    median = median(val),
+    q75 = quantile(val, 0.75),
+    q95 = quantile(val, 0.95),
+    q99 = quantile(val, 0.99),
+    max = max(val),
+    frac_300 = mean(val > 290),
+    frac_0 = mean(val < 0.01)
+  )
+
+pkr_sample_groups <- pkr_engager_groups %>%
+  filter(group %in% c("Engager", "Non_Engager")) %>%
+  select(sample, cancer_type, frac_accessible, grouping_label = group)
+
+write_tsv(pkr_sample_groups, "pkr/pkr_quartile_grouping/cluster_definitions/pkr_sample_groups_quartile_grouping.tsv")
+```
+
+# Violin plot and table showing distribution of proportion of loci with p-val <0.05 in each cancer type
+```{r}
+
+#### Violin plot ####
+pkr_accessibility_violin_plot <- pkr_accessibility_pvals_long %>%
+  mutate(accessible = pval < 0.05) %>%
+  group_by(sample, cancer_type) %>%
+  summarise(frac_accessible = mean(accessible), .groups = "drop") %>%
+  filter(cancer_type %in% c("BRCA", "COAD", "KIRP", "STAD", "KIRC", "BLCA")) %>%
+  ggplot(aes(x = cancer_type, y = frac_accessible)) +
+  geom_violin(aes(fill = cancer_type), alpha = 0.5, trim = FALSE,
+              draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.12, size = 1.2, alpha = 0.7) +
+  theme_minimal() +
+  labs(y = "Proportion of PKR loci accessible (p < 0.05)", x = NULL) +
+  theme(legend.position = "none")
+
+ggsave("pkr/pkr_accessible_proportions_violin_plot.png", 
+       plot = pkr_accessibility_violin_plot,
+       width = 7,
+       height = 5,
+       units = "in", 
+       dpi = 300)
+
+#### Engager grouops by quartile cut ####
+pkr_engager_groups <- pkr_accessibility_pvals_long %>%
+  mutate(accessible = pval < 0.05) %>%
+  group_by(sample, cancer_type) %>%
+  summarise(frac_accessible = mean(accessible), .groups = "drop") %>%
+  filter(cancer_type %in% c("BRCA","COAD","KIRP","STAD","KIRC","BLCA")) %>%
+  group_by(cancer_type) %>%
+  mutate(
+    lower_cut = quantile(frac_accessible, 0.25),
+    upper_cut = quantile(frac_accessible, 0.75),
+    group = case_when(
+      frac_accessible <= lower_cut ~ "Non_Engager",
+      frac_accessible >= upper_cut ~ "Engager",
+      TRUE ~ "Middle"
+    )
+  ) %>%
+  ungroup()
+
+pkr_engager_group_counts <- pkr_engager_groups %>%
+  filter(group %in% c("Engager","Non_Engager")) %>%
+  count(cancer_type, group) %>%
+  pivot_wider(names_from = group, values_from = n, values_fill = 0)
+
+# A tibble: 6 × 3
+#   cancer_type Engager Non_Engager
+#   <chr>         <int>       <int>
+# 1 BLCA              2           2
+# 2 BRCA             16          15
+# 3 COAD              9           9
+# 4 KIRC              3           3
+# 5 KIRP              9           9
+# 6 STAD              4           4
+
+pkr_engager_group_counts %>%
+  gt() %>%
+  tab_header(
+    title = "PKR engager groups by cancer type",
+    subtitle = "Upper and lower quartiles of proportion of PKR loci accessible (p < 0.05)"
+  ) %>%
+  cols_label(cancer_type = "Cancer Type") %>%
+  tab_options(column_labels.background.color = "whitesmoke") %>%
+  gtsave("pkr/pkr_quartile_grouping/cluster_definitions/pkr_engager_group_counts.html")
+```
+
+# PASTED FROM GMM GROUPING SCRIPT JUST USE AS REFERENCE 
+```{r}
+
+
+
+
+
+
+
+
+
+
+# A tibble: 18 × 3
+#    cancer_type cluster     n
+#    <chr>         <dbl> <int>
+#  1 BLCA              1     1
+#  2 BLCA              2     3
+#  3 BLCA              3     4
+#  4 BRCA              1    23
+#  5 BRCA              2    27
+#  6 BRCA              3     7
+#  7 COAD              1     8
+#  8 COAD              2    27
+#  9 COAD              3     1
+# 10 KIRC              1     5
+# 11 KIRC              2     5
+# 12 KIRC              3     1
+# 13 KIRP              1    16
+# 14 KIRP              2    16
+# 15 KIRP              3     1
+# 16 STAD              1     7
+# 17 STAD              2     8
+# 18 STAD              3     1
+
+sample_gmm_scores <- engager_loci_pvals_candidate_cancers %>% 
+  left_join(gmm_results_by_cancer %>%  select(sample, cluster),
+            by = "sample"
+            ) %>% 
+  rowwise() %>% 
+  mutate(sample_mean_accessibility = mean(c_across(starts_with("chr")))) %>% 
+  ungroup()
+
+# Rank clusters within each cancer type by mean accessibility
+cluster_definitions <- sample_gmm_scores %>% 
+  group_by(cancer_type, cluster) %>% 
+  summarise(
+    n_samples = n(),
+    avg_cluster_accessibility = mean(sample_mean_accessibility),
+    .groups = "drop"
+  ) %>% 
+  group_by(cancer_type) %>% 
+  arrange(cancer_type, desc(avg_cluster_accessibility)) %>% 
+  mutate(
+    grouping_label = case_when(
+      row_number() == 1 ~ "Engager",
+      row_number() == 2 ~ "Intermediate",
+      row_number() == 3 ~ "Non_Engager"
+    )
+  ) %>% 
+  ungroup()
+
+#write_tsv(cluster_definitions, "~/gmm_grouping/cluster_definitions/gmm_cluster_definitions.tsv")
+
+# Make the gt table figure
+cluster_definitions %>%
+  mutate(grouping_label = factor(grouping_label,
+                                 levels = c("Engager", "Intermediate", "Non_Engager"))) %>%
+  arrange(cancer_type, grouping_label) %>%
+  gt(groupname_col = "cancer_type") %>%
+  tab_header(
+    title = "GMM Cluster Assignments by Cancer Type",
+    subtitle = "Clusters ranked by mean accessibility (-log10 p-value) across 132 RIG-I engager loci"
+  ) %>%
+  cols_label(
+    cluster = "Cluster",
+    n_samples = "N Samples",
+    avg_cluster_accessibility = "Mean Accessibility",
+    grouping_label = "Group"
+  ) %>%
+  fmt_number(columns = avg_cluster_accessibility, decimals = 1) %>%
+  tab_options(row_group.background.color = "whitesmoke") %>% 
+  gtsave(.,"~/gmm_grouping/cluster_definitions/gmm_cluster_definitions_table.html")
+
+
+final_cluster_groups <- sample_gmm_scores %>%
+  left_join(
+    cluster_definitions %>% dplyr::select(cancer_type, cluster, grouping_label),
+    by = c("cancer_type", "cluster")
+  )
+
+#write_tsv(final_cluster_groups, "~/gmm_grouping/gmm_sample_groups.tsv")
+
+```
+
