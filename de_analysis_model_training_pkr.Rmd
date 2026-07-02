@@ -1,0 +1,2317 @@
+---
+title: "de_analysis_model_training_pkr.Rmd"
+output: html_document
+date: "2026-07-01"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = "hide")
+
+
+```
+
+
+```{r packages}
+install.packages("BiocManager")
+
+# Install the necessary bioinformatics packages
+# TCGAbiolinks: for data access
+# GSVA: for the 94-gene signature scoring
+# SummarizedExperiment: the standard data container for TCGA data
+BiocManager::install(c("TCGAbiolinks", "GSVA", "SummarizedExperiment"))
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+BiocManager::install("sesameData")
+BiocManager::install("sesame")
+BiocManager::install("sesame")
+BiocManager::install("edgeR")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("DESeq2")
+BiocManager::install("apeglm", update = FALSE, ask = FALSE)
+BiocManager::install("survminer")
+BiocManager::install(c("BiocGenerics", "S4Vectors", "IRanges"), force = TRUE, update = TRUE, ask = FALSE)
+BiocManager::install("DESeq2", force=TRUE, update = FALSE, ask = FALSE)
+
+install.packages("nloptr")
+install.packages("ggpubr")
+install.packages("cowplot")
+install.packages("gt")
+install.packages("minifi")
+install.packages("glmnet")
+install.packages("ggrepel")
+
+
+# 4/15/26 trying to get DESeq2
+# 1. Remove the mismatched packages from your local Linux library
+remove.packages(c("BiocGenerics", "S4Vectors", "IRanges"))
+
+# 2. Force BiocManager to use the correct repository for R 4.3
+BiocManager::install(version = "3.18", ask = FALSE)
+
+# 3. Install DESeq2 cleanly from the 3.18 repository
+BiocManager::install("DESeq2", update = FALSE, ask = FALSE)
+
+BiocManager::install(c("BiocGenerics", "IRanges", "S4Vectors", "DESeq2"), update = FALSE, ask = FALSE)
+
+# 1. Delete the corrupted phantom folder directly from the file system
+unlink("/home/nvsharm/R/x86_64-pc-linux-gnu-library/4.3/S4Vectors", recursive = TRUE)
+
+# 2. Install S4Vectors by pointing explicitly to the Bioconductor 3.18 repository
+install.packages("S4Vectors", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+install.packages("IRanges", repos = "https://bioconductor.org/packages/3.18/bioc")
+
+# 3. Test DESeq2
+library(DESeq2)
+
+
+
+
+# Install clusterProfiler and msigdbr
+BiocManager::install("clusterProfiler")
+install.packages("msigdbr")
+
+install.packages("PRROC")
+install.packages("webshot2")
+
+```
+
+
+```{r load packages}
+library(BiocManager)
+library(TCGAbiolinks)
+library(GSVA)
+library(SummarizedExperiment)
+library(tidyverse)
+library(nloptr)
+library(ggpubr)
+library(cowplot)
+library(gt)
+library(webshot2)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(sesameData)
+library(sesame)
+library(edgeR)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(S4Vectors)
+library(IRanges)
+library(DESeq2)
+library(apeglm)
+#library(clusterProfiler)
+library(msigdbr)
+library(glmnet)
+library(survminer)
+library(ggrepel)
+library(PRROC)
+library(conflicted)
+library(webshot2)
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("count", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflicts_prefer(SummarizedExperiment::rowRanges)
+conflicts_prefer(base::intersect)
+```
+
+```{r read objects and files}
+
+ifn_genes <- readRDS("~/ifn_genes.rds")
+pkr_sample_groups <- readr::read_tsv("~/pkr/pkr_quartile_grouping/cluster_definitions/pkr_sample_groups_quartile_grouping.tsv")
+gdc_sample_metadata <- read_csv("~/gdc_sample_sheet_1.txt") 
+
+# Reformat gdc_sample_metadata and join it to gmm_groups, then reformat so it will work with downstream functions
+gdc_sample_metadata_clean <- gdc_sample_metadata %>% 
+  mutate(sample = str_replace(project_id, "TCGA-", "") %>% str_replace("-", ".")) 
+
+# Map gmm sample ids to case_id, dedup, and add engager group classification
+pkr_sample_groups_clean <- pkr_sample_groups %>%
+  filter(grouping_label %in% c("Engager", "Non_Engager")) %>%
+  mutate(engager_group = if_else(grouping_label == "Engager", "engager", "non_engager")) %>%
+  left_join(gdc_sample_metadata_clean %>% dplyr::select(sample, case_id, sample_id, sample_type),
+            by = "sample") %>%
+  group_by(case_id) %>%
+  slice_sample(n = 1) %>%
+  ungroup()
+
+pkr_sample_groups_clean %>% filter(is.na(case_id)) %>% nrow()
+pkr_sample_groups_clean %>% count(cancer_type, engager_group)
+# A tibble: 12 × 3
+#    cancer_type engager_group     n
+#    <chr>       <chr>         <int>
+#  1 BLCA        engager           2
+#  2 BLCA        non_engager       2
+#  3 BRCA        engager          16
+#  4 BRCA        non_engager      15
+#  5 COAD        engager           7
+#  6 COAD        non_engager       9
+#  7 KIRC        engager           3
+#  8 KIRC        non_engager       3
+#  9 KIRP        engager           9
+# 10 KIRP        non_engager       9
+# 11 STAD        engager           4
+# 12 STAD        non_engager       4
+
+
+pkr_sample_groups %>%
+  filter(grouping_label %in% c("Engager", "Non_Engager")) %>%
+  mutate(engager_group = if_else(grouping_label == "Engager", "engager", "non_engager")) %>%
+  left_join(gdc_sample_metadata_clean %>% dplyr::select(sample, case_id), by = "sample") %>%
+  group_by(case_id) %>%
+  filter(n_distinct(engager_group) > 1) %>%
+  ungroup()
+
+```
+
+# Extract raw counts for de analysis
+
+```{r}
+
+prepare_and_cache_rnaseq <- function(cancer_type, matched_samples = NULL, matched_only = TRUE, cache_dir = "tcga_cache_pkr") {
+  
+  if(!dir.exists(cache_dir)) dir.create(cache_dir)
+  
+  # 1. Generate unique cache paths
+  suffix <- if(matched_only) "_matched.rds" else "_full.rds"
+  cache_file <- file.path(cache_dir, paste0(cancer_type, suffix))
+  
+  # 2. Return cached data if available
+  if(file.exists(cache_file)) {
+    message("\n>>> Loading CACHED RNA-seq data: ", cancer_type, " (", if(matched_only) "Matched" else "Full", ")")
+    return(readRDS(cache_file))
+  }
+  
+  # 3. Download from GDC
+  message("\n>>> Downloading NEW RNA-seq data for ", cancer_type)
+  query <- GDCquery(
+    project = paste0("TCGA-", cancer_type),
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts",
+    sample.type = "Primary Tumor"
+  )
+  GDCdownload(query)
+  se <- GDCprepare(query)
+  
+  # 4. Standardize Patient IDs (12-char barcode)
+  colData(se)$case_id <- substr(colData(se)$barcode, 1, 12)
+  
+  # 5. Execute Branching Logic
+  if(matched_only) {
+    # Discovery Mode: Filter to the 29 matched samples
+    if(is.null(matched_samples)) stop("Error: matched_samples required when matched_only = TRUE")
+    
+    target_ids <- matched_samples %>%
+      filter(cancer_type == .env$cancer_type) %>%
+      pull(case_id)
+    
+    se_final <- se[, colData(se)$case_id %in% target_ids]
+    se_final <- se_final[, !duplicated(colData(se_final)$case_id)]
+    
+    meta_df <- as.data.frame(colData(se_final)) %>%
+      left_join(matched_samples %>% 
+                  filter(cancer_type == .env$cancer_type) %>% 
+                  dplyr::select(case_id, engager_group), 
+                by = "case_id")
+  } else {
+    # Validation Mode: Keep all patients (~1,100 for BRCA)
+    se_final <- se[, !duplicated(colData(se)$case_id)]
+    meta_df <- as.data.frame(colData(se_final))
+  }
+  
+  # 6. Save and Return
+  final_data <- list(
+    counts = assay(se_final, "unstranded"),
+    se = se_final,
+    meta = meta_df
+  )
+  
+  saveRDS(final_data, cache_file)
+  message("  Saved to cache: ", cache_file)
+  return(final_data)
+}
+
+
+```
+
+
+# DE analysis
+1) engagers vs non_engagers
+2) get up and down genes
+3) Are any up genes in IFN signature genes?
+
+## DESeq2
+### Table of how many samples are in each cancer type for DE analysis
+```{r}
+pkr_sample_groups_clean %>%
+  count(cancer_type, engager_group)
+
+pkr_sample_groups_clean %>%
+  count(cancer_type, engager_group) %>%
+  pivot_wider(names_from = engager_group, values_from = n) %>%
+  mutate(total = engager + non_engager) %>%
+  gt() %>%
+  cols_label(
+    cancer_type = "Cancer Type",
+    engager = "Engager",
+    non_engager = "Non-Engager",
+    total = "Total"
+  ) %>%
+  tab_header(title = "Sample counts by PKR engager group")
+```
+
+
+### Module 1 Core DESeq2 Function
+```{r}
+
+# Function handles matrix setup, variance stabilization, and DE testing 
+# returns a list containing the raw dds object, the full results df, and intersection logic
+run_deseq2_core <- function(cancer_type, matched_samples, pol3_loci_long, ifn_genes, cache_dir = "tcga_cache_gmm") {
+  
+  message("\n>>> Running DESeq2 Core for ", cancer_type)
+  data <- prepare_and_cache_rnaseq(cancer_type, matched_samples, cache_dir = cache_dir)
+  
+  # Ensure reference level
+  data$meta$engager_group <- factor(data$meta$engager_group, levels = c("non_engager", "engager"))
+  
+  dds <- DESeqDataSetFromMatrix(countData = data$counts,
+                                colData = data$meta,
+                                design = ~ engager_group)
+  
+  keep <- rowSums(counts(dds)) >= 10
+  dds <- dds[keep,]
+  dds <- DESeq(dds)
+  res <- lfcShrink(dds, coef="engager_group_engager_vs_non_engager", type="apeglm")
+  
+  res_df <- as.data.frame(res)
+  res_df$ensembl_id <- rownames(res_df) %>% str_remove("\\..*")
+  res_df$gene_name <- mapIds(org.Hs.eg.db,
+                             keys = res_df$ensembl_id,
+                             column = "SYMBOL",
+                             keytype = "ENSEMBL",
+                             multiVals = "first")
+  
+  up_genes <- res_df %>% filter(padj < 0.05, !is.na(gene_name), log2FoldChange > 0.5) %>% pull(gene_name)
+  down_genes <- res_df %>% filter(padj < 0.05, !is.na(gene_name), log2FoldChange < -0.5) %>% pull(gene_name)
+  
+  # Engager loci overlap logic
+  engager_loci <- pol3_loci_long %>%
+    filter(cancer_type == .env$cancer_type, is_5ppp == 1, accessibility == 1) %>%
+    distinct(V1, V2, V3)
+  
+  engager_gr <- GRanges(seqnames = engager_loci$V1, ranges = IRanges(start = as.integer(engager_loci$V2), end = as.integer(engager_loci$V3)))
+  up_gr <- rowRanges(data$se)[rowData(data$se)$gene_name %in% up_genes]
+  overlaps <- findOverlaps(up_gr, engager_gr)
+  genes_with_engager_loci <- names(up_gr)[queryHits(overlaps)]
+  
+  return(list(
+    cancer_type = cancer_type,
+    dds = dds,
+    res_df = res_df,
+    up_genes = up_genes,
+    down_genes = down_genes,
+    ifn_overlap = intersect(up_genes, ifn_genes),
+    genes_with_engager_loci = genes_with_engager_loci,
+    n_samples = nrow(data$meta),
+    n_per_group = table(data$meta$engager_group)
+  ))
+}
+
+```
+
+
+
+
+### Module 2 QC Plotting
+Dispersion plot, Volcano plot, PCA plot
+```{r}
+generate_deseq_qc_plots <- function(deseq_output, output_dir = "gmm_grouping/de_qc_plots") {
+  ct <- deseq_output$cancer_type
+  dds <- deseq_output$dds
+  
+  dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  # Dispersion Plot
+  #png(paste0(output_dir, ct, "_dispersion.png"), width=600, height=500)
+  png(file.path(output_dir, paste0(ct, "_dispersion.png")), width=600, height=500)
+  plotDispEsts(dds, main=paste(ct, "Dispersion Estimates"))
+  dev.off()
+  
+  # PCA Plot
+  vsd <- vst(dds, blind=FALSE)
+  pca_data <- plotPCA(vsd, intgroup="engager_group", returnData=TRUE)
+  percentVar <- round(100 * attr(pca_data, "percentVar"))
+  
+  pca_plot <- ggplot(pca_data, aes(PC1, PC2, color=engager_group)) +
+    geom_point(size=3, alpha=0.8) +
+    theme_minimal() +
+    labs(title=paste(ct, "PCA"),
+         x=paste0("PC1: ", percentVar[1], "%"),
+         y=paste0("PC2: ", percentVar[2], "%")) +
+    scale_color_manual(values=c("non_engager"="#00BFC4", "engager"="#F8766D"))
+  
+  #ggsave(paste0("DESeq_QC_Plots/", ct, "_PCA.png"), plot=pca_plot, width=5, height=4)
+  ggsave(file.path(output_dir, paste0(ct, "_PCA.png")), plot=pca_plot, width=5, height=4)
+  
+  # --- NEW VOLCANO PLOT SECTION ---
+  # Identify Top 20 significant genes
+  top_20 <- as.data.frame(deseq_output$res_df) %>%
+    filter(!is.na(padj)) %>%
+    arrange(padj) %>%
+    slice_head(n = 20) %>%
+    pull(gene_name)
+  
+  # Combine with biological overlap lists
+  biological_overlaps <- c(deseq_output$ifn_overlap, deseq_output$genes_with_engager_loci)
+  genes_to_label <- unique(c(top_20, biological_overlaps))
+  
+  # Prepare data: define colors and which genes to label
+  volcano_data <- as.data.frame(deseq_output$res_df) %>%
+    mutate(
+      significance = case_when(
+        padj < 0.05 & log2FoldChange > 0.5 ~ "Up",
+        padj < 0.05 & log2FoldChange < -0.5 ~ "Down",
+        TRUE ~ "NS"
+      ),
+      label = if_else(gene_name %in% genes_to_label & padj < 0.05, gene_name, NA_character_)
+    )
+
+  volcano_plot <- ggplot(volcano_data, aes(x=log2FoldChange, y=-log10(padj), color=significance)) +
+    geom_point(alpha=0.4, size=1.5) +
+    scale_color_manual(values=c("Up"="#F8766D", "Down"="#00BFC4", "NS"="grey70")) +
+    geom_text_repel(aes(label=label), color="black", size=3, max.overlaps = 30) +
+    theme_minimal() +
+    labs(title=paste(ct, "Volcano Plot"), 
+         subtitle="Labeled: Top 20 Significant + Biological Overlaps",
+         x="log2 Fold Change", y="-log10 Adjusted P-value")
+  
+  #ggsave(paste0("DESeq_QC_Plots/", ct, "_volcano.png"), plot=volcano_plot, width=7, height=6)
+  ggsave(file.path(output_dir, paste0(ct, "_volcano.png")), plot=volcano_plot, width=7, height=6)
+  
+  # --- END VOLCANO SECTION ---
+  
+  message("Saved QC plots for ", ct)
+}
+```
+
+
+### Module 3 GSVA sample-by-sample scoring
+```{r}
+calculate_sample_scores <- function(deseq_output, custom_index = NULL) {
+  
+  # Default to the cancer-specific up_genes if no index is provided
+  if(is.null(custom_index)) {
+    custom_index <- deseq_output$up_genes
+  }
+  
+  if(length(custom_index) == 0) {
+    message("No index genes available for ", deseq_output$cancer_type)
+    return(NULL)
+  }
+  
+  # Extract VST normalized counts
+  vsd <- vst(deseq_output$dds, blind=FALSE)
+  vst_mat <- assay(vsd)
+  
+  # Map rownames from Ensembl to Symbol for GSVA matching
+  rownames(vst_mat) <- deseq_output$res_df$gene_name[match(rownames(vst_mat), rownames(deseq_output$res_df))]
+  vst_mat <- vst_mat[!is.na(rownames(vst_mat)), ] # Drop any genes that didn't map correctly to a symbol (NAs)
+  
+  # Put the up genes (for brca = 133 up genes) into a list format for GSVA package
+  index_list <- list(Target_Index = custom_index)
+  
+  # run GSVA to get one score per column (per sample)
+  gsva_res <- gsva(expr = vst_mat, gset.idx.list = index_list, method = "gsva", verbose = FALSE)
+  
+  # format into a table that can be used to make a boxplot
+  sample_scores <- data.frame(
+    case_id = colnames(vst_mat),
+    custom_metric = as.numeric(gsva_res["Target_Index", ]),
+    group = deseq_output$dds$engager_group
+  )
+  
+  return(sample_scores)
+}
+```
+
+### BRCA 
+```{r}
+#### Module 1_____ ####
+brca_deseq2_test <- run_deseq2_core("BRCA", gmm_sample_groups_clean, pol3_loci_long, ifn_genes)
+brca_deseq2_test$n_per_group
+# non_engager     engager 
+#          23          7
+length(brca_deseq2_test$up_genes)
+# [1] 104
+brca_deseq2_test$res_df %>% View
+brca_deseq2_test$ifn_overlap
+# character(0)
+brca_deseq2_test$genes_with_engager_loci
+# character(0)
+
+
+#### Module 2______ ####
+# Generate the PCA and Dispersion plots and volcano plots
+generate_deseq_qc_plots(brca_deseq2_test)
+
+
+#### Module 3______ ####
+# Generate the custom sample-by-sample metric
+brca_gsva_scores <- calculate_sample_scores(brca_deseq2_test)
+
+# Visualize the custom 133 gene score
+group_colors <- c("non_engager" = "#4575b4", "engager" = "#d73027")
+
+brca_gsva_boxplot <- ggplot(brca_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
+  # Create the boxplot with a bit of transparency
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  # Add the sample points (dots) and color them by group
+  geom_jitter(aes(color = group), width = 0.2, size = 2.5, alpha = 0.8) +
+  # Use a clean, professional theme
+  theme_minimal() +
+  # Map the colors we defined
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  # Refine labels and titles
+  labs(
+    title = "BRCA: Sample-Level Gene Set Scoring",
+    subtitle = paste0("Based on ", length(brca_deseq2_test$up_genes), "-gene Signature"),
+    y = "GSVA Enrichment Score",
+    x = NULL # Removing 'group' label as the axis categories make it obvious
+  ) +
+  # Remove the legend since the x-axis already labels the groups
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11, color = "black"),
+    panel.grid.minor = element_blank()
+  ) +
+  stat_compare_means(method = "wilcox.test", label.x = 1.5, label.y = 0.6)
+
+ggsave("gmm_grouping/gsva/brca_gsva_boxplot.png", plot = brca_gsva_boxplot,
+       width = 5.5, height = 5, units = "in", dpi = 300)
+
+
+# ggplot(brca_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
+#   geom_boxplot() +
+#   geom_jitter(width = 0.2) +
+#   theme_minimal() +
+#   labs(title = "BRCA: Sample-by-Sample Custom Metric (133-Gene Index)", y = "GSVA Score")
+
+# 2. See which of 33 genes overlap with ifn_genes
+brca_deseq2_ifn_overlap <- intersect(brca_deseq2_test$up_genes, ifn_genes)
+
+# 3. Check the results
+print(paste("Number of overlapping IFN genes:", length(brca_deseq2_ifn_overlap)))
+print(brca_deseq2_ifn_overlap)
+
+
+#### MSigDB interrogation of up genes______####
+
+# 1. Pull the official Hallmark immune sets
+msigdb_hallmark_sets <- msigdbr(species = "human", category = "H")
+ifn_alpha_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_ALPHA_RESPONSE", ]$gene_symbol
+ifn_gamma_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE", ]$gene_symbol
+inflam_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INFLAMMATORY_RESPONSE", ]$gene_symbol
+
+# Pull the RIG-I / RLR-specific sets from C2
+c2_reactome <- msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
+c2_kegg     <- msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG_LEGACY")
+rigi_ifn_list <- c2_reactome[c2_reactome$gs_name == "REACTOME_DDX58_IFIH1_MEDIATED_INDUCTION_OF_INTERFERON_ALPHA_BETA", ]$gene_symbol
+rlr_list      <- c2_kegg[c2_kegg$gs_name == "KEGG_RIG_I_LIKE_RECEPTOR_SIGNALING_PATHWAY", ]$gene_symbol
+ifn_sig_list  <- c2_reactome[c2_reactome$gs_name == "REACTOME_INTERFERON_SIGNALING", ]$gene_symbol
+
+# Create a list of these specific pathways
+target_pathways <- list(
+  ifn_alpha = ifn_alpha_list,
+  ifn_gamma = ifn_gamma_list,
+  inflammatory = inflam_list,
+  rigi_ifn_induction = rigi_ifn_list,
+  rlr_signaling = rlr_list,
+  ifn_signaling = ifn_sig_list
+)
+
+# 2. Extract VST normalized counts and convert Ensembl IDs to Gene Symbols
+vst_brca <- vst(brca_deseq2_test$dds, blind=FALSE)
+brca_vst_mat <- assay(vst_brca)
+rownames(brca_vst_mat) <- brca_deseq2_test$res_df$gene_name[match(rownames(brca_vst_mat), rownames(brca_deseq2_test$res_df))]
+brca_vst_mat <- brca_vst_mat[!is.na(rownames(brca_vst_mat)), ]
+
+# 3. Score the BRCA samples against ONLY these immune pathways
+#gsva_par <- gsvaParam(exprData = brca_vst_mat, geneSets = target_pathways)
+brca_immune_gsva <- gsva(expr = brca_vst_mat,
+                         gset.idx.list = target_pathways,
+                         method = "gsva",
+                         verbose = FALSE)
+#brca_immune_gsva <- gsva(gsva_par, verbose = FALSE)
+
+# 4. Format all three pathways into a dataframe
+brca_immune_scores <- data.frame(
+  case_id = colnames(brca_vst_mat),
+  ifn_alpha = as.numeric(brca_immune_gsva["ifn_alpha", ]),
+  ifn_gamma = as.numeric(brca_immune_gsva["ifn_gamma", ]), 
+  inflammatory = as.numeric(brca_immune_gsva["inflammatory", ]),
+  rigi_ifn_induction = as.numeric(brca_immune_gsva["rigi_ifn_induction", ]),
+  rlr_signaling = as.numeric(brca_immune_gsva["rlr_signaling", ]),
+  ifn_signaling = as.numeric(brca_immune_gsva["ifn_signaling", ]),
+  group = brca_deseq2_test$dds$engager_group
+)
+
+# Reshape data for ggplot faceting
+brca_immune_long <- brca_immune_scores %>%
+  pivot_longer(cols = c(ifn_alpha, ifn_gamma, inflammatory, rigi_ifn_induction, rlr_signaling, ifn_signaling),
+               names_to = "pathway",
+               values_to = "score")
+
+
+# 5. Plot all pathways side-by-side
+brca_msigdb_hallmark_rigi_pathways_boxplot <- ggplot(brca_immune_long, aes(x = group, y = score, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  geom_jitter(aes(color = group), width = 0.2, size = 2, alpha = 0.8) +
+  facet_wrap(~ pathway) +
+  theme_minimal() +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(
+    title = "BRCA: Immune and RIG-I Pathway GSVA Scores", 
+    y = "GSVA Enrichment Score", 
+    x = NULL
+  ) +
+  theme(
+    legend.position = "none", 
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11, color = "black"),
+    strip.text = element_text(size = 12, face = "bold"),
+    panel.grid.minor = element_blank()
+  ) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.3)
+
+#ggsave("gmm_grouping/gsva/brca_msigdb_hallmark_rigi_pathways_boxplot.png", plot = brca_msigdb_hallmark_rigi_pathways_boxplot,
+#       width = 7, height = 7, units = "in", dpi = 300)
+brca_msigdb_hallmark_rigi_pathways_boxplot
+# Check which samples score high in each rig-i set and whether they're the same. pull the sample scores for the two sets filtered on engager group
+
+brca_immune_scores %>%
+  filter(group == "engager") %>%
+  mutate(
+    high_rigi = rigi_ifn_induction > median(rigi_ifn_induction),
+    high_rlr  = rlr_signaling > median(rlr_signaling)
+  ) %>%
+  arrange(desc(rigi_ifn_induction)) %>% 
+  select(case_id, rigi_ifn_induction, rlr_signaling, high_rigi, high_rlr)
+
+#                        case_id rigi_ifn_induction rlr_signaling high_rigi high_rlr
+# 1 TCGA-C8-A133-01A-32R-A12D-07         0.11279085    0.33837169      TRUE     TRUE
+# 2 TCGA-C8-A12Y-01A-11R-A12D-07         0.05882558    0.24679821      TRUE     TRUE
+# 3 TCGA-C8-A12Q-01A-11R-A115-07         0.03653702    0.12855248      TRUE     TRUE
+# 4 TCGA-C8-A137-01A-11R-A115-07         0.02662996    0.09244225     FALSE    FALSE
+# 5 TCGA-A2-A0CX-01A-21R-A00Z-07        -0.16943467   -0.13354934     FALSE    FALSE
+# 6 TCGA-A8-A08J-01A-11R-A00Z-07        -0.21126415    0.11155681     FALSE    FALSE
+# 7 TCGA-BH-A1EV-01A-11R-A137-07        -0.30932132   -0.30357113     FALSE    FALSE
+
+```
+
+
+### COAD 
+```{r}
+#### Module 1_____________ ####
+coad_deseq2_test <- run_deseq2_core("COAD", gmm_sample_groups_clean, pol3_loci_long, ifn_genes)
+coad_deseq2_test$n_per_group
+# non_engager     engager 
+#          26          6
+length(coad_deseq2_test$up_genes)
+# [1] 57
+coad_deseq2_test$res_df %>% View
+coad_deseq2_test$ifn_overlap
+coad_deseq2_test$genes_with_engager_loci
+
+#### Module 2____________ ####
+# Generate the PCA and Dispersion plots
+generate_deseq_qc_plots(coad_deseq2_test)
+
+
+#### Module 3_____________ ####
+# Generate the custom sample-by-sample metric
+coad_gsva_scores <- calculate_sample_scores(coad_deseq2_test)
+
+
+# 
+group_colors <- c("non_engager" = "#4575b4", "engager" = "#d73027")
+coad_gsva_boxplot <- ggplot(coad_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
+  # Create the boxplot with a bit of transparency
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  # Add the sample points (dots) and color them by group
+  geom_jitter(aes(color = group), width = 0.2, size = 2.5, alpha = 0.8) +
+  # Use a clean, professional theme
+  theme_minimal() +
+  # Map the colors we defined
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  # Refine labels and titles
+  labs(
+    title = "COAD: Sample-Level Gene Set Scoring",
+    subtitle = paste0("Based on ", length(coad_deseq2_test$up_genes), "-gene Signature"),
+    y = "GSVA Enrichment Score",
+    x = NULL # Removing 'group' label as the axis categories make it obvious
+  ) +
+  # Remove the legend since the x-axis already labels the groups
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11, color = "black"),
+    panel.grid.minor = element_blank()
+  ) +
+  stat_compare_means(method = "wilcox.test", label.x = 1.5, label.y = 0.6)
+
+#ggsave("gmm_grouping/gsva/coad_gsva_boxplot.png", plot = coad_gsva_boxplot,
+#       width = 5.5, height = 5, units = "in", dpi = 300)
+
+#### MSigDB interrogation of immune pathways______####
+
+# # 1. Pull the official Hallmark immune sets (re-defining to ensure safe exact-match names)
+# msigdb_hallmark_sets <- msigdbr(species = "human", category = "H")
+# ifn_alpha_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_ALPHA_RESPONSE", ]$gene_symbol
+# ifn_gamma_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE", ]$gene_symbol
+# inflam_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INFLAMMATORY_RESPONSE", ]$gene_symbol
+# 
+
+
+# target_pathways <- list(
+#   ifn_alpha = ifn_alpha_list,
+#   ifn_gamma = ifn_gamma_list,
+#   inflammatory = inflam_list,
+#   rigi_ifn_induction = rigi_ifn_list,
+#   rlr_signaling = rlr_list,
+#   ifn_signaling = ifn_sig_list
+# )
+
+# 2. Extract VST normalized counts and convert Ensembl IDs to Gene Symbols
+vst_coad <- vst(coad_deseq2_test$dds, blind=FALSE)
+coad_vst_mat <- assay(vst_coad)
+rownames(coad_vst_mat) <- coad_deseq2_test$res_df$gene_name[match(rownames(coad_vst_mat), rownames(coad_deseq2_test$res_df))]
+coad_vst_mat <- coad_vst_mat[!is.na(rownames(coad_vst_mat)), ]
+
+# 3. Score the COAD samples against ONLY these immune pathways
+coad_immune_gsva <- gsva(expr = coad_vst_mat, 
+                         gset.idx.list = target_pathways, 
+                         method = "gsva", 
+                         verbose = FALSE)
+
+# 4. Format all pathways into a dataframe
+coad_immune_scores <- data.frame(
+  case_id = colnames(coad_vst_mat),
+  ifn_alpha = as.numeric(coad_immune_gsva["ifn_alpha", ]),
+  ifn_gamma = as.numeric(coad_immune_gsva["ifn_gamma", ]),
+  inflammatory = as.numeric(coad_immune_gsva["inflammatory", ]),
+  rigi_ifn_induction = as.numeric(coad_immune_gsva["rigi_ifn_induction", ]),
+  rlr_signaling = as.numeric(coad_immune_gsva["rlr_signaling", ]),
+  ifn_signaling = as.numeric(coad_immune_gsva["ifn_signaling", ]),
+  group = coad_deseq2_test$dds$engager_group
+)
+
+# Reshape data for ggplot faceting
+coad_immune_long <- coad_immune_scores %>%
+  pivot_longer(cols = c(ifn_alpha, ifn_gamma, inflammatory,rigi_ifn_induction, rlr_signaling, ifn_signaling),
+               names_to = "pathway",
+               values_to = "score")
+
+# 5. Plot all three pathways side-by-side with a shared y-axis
+coad_msigdb_hallmark_rigi_pathways_boxplot<- ggplot(coad_immune_long, aes(x = group, y = score, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
+  geom_jitter(aes(color = group), width = 0.2, size = 2, alpha = 0.8) +
+  facet_wrap(~ pathway) +
+  theme_minimal() +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  labs(
+    title = "COAD: Immune and RIG-I Pathway GSVA Scores", 
+    y = "GSVA Enrichment Score", 
+    x = NULL
+  ) +
+  theme(
+    legend.position = "none", 
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11, color = "black"),
+    strip.text = element_text(size = 12, face = "bold"),
+    panel.grid.minor = element_blank()
+  ) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.3)
+
+#ggsave("gmm_grouping/gsva/coad_msigdb_hallmark_rigi_pathways_boxplot.png", plot = coad_msigdb_hallmark_rigi_pathways_boxplot,
+#       width = 7, height = 7, units = "in", dpi = 300)
+
+# Check which samples score high in each rig-i set and whether they're the same. pull the sample scores for the two sets filtered on engager group
+
+coad_immune_scores %>%
+  filter(group == "engager") %>%
+  mutate(
+    high_rigi = rigi_ifn_induction > median(rigi_ifn_induction),
+    high_rlr  = rlr_signaling > median(rlr_signaling)
+  ) %>%
+  arrange(desc(rigi_ifn_induction)) %>% 
+  select(case_id, rigi_ifn_induction, rlr_signaling, high_rigi, high_rlr)
+
+#                        case_id rigi_ifn_induction rlr_signaling high_rigi high_rlr
+# 1 TCGA-QG-A5YX-01A-11R-A28H-07         0.10792095   0.155633893      TRUE     TRUE
+# 2 TCGA-NH-A50U-01A-33R-A37K-07        -0.05733516   0.003423353      TRUE     TRUE
+# 3 TCGA-AA-A01S-01A-21R-A083-07        -0.12131754  -0.026831583      TRUE    FALSE
+# 4 TCGA-AY-A69D-01A-11R-A37K-07        -0.20292437  -0.019295622     FALSE     TRUE
+# 5 TCGA-AA-A010-01A-01R-A089-07        -0.22216411  -0.023751492     FALSE    FALSE
+# 6 TCGA-SS-A7HO-01A-21R-A37K-07        -0.42300977  -0.327671319     FALSE    FALSE
+
+#### Is there overlap of up genes with other cancertypes?____####
+# 2. See which of 33 genes overlap with ifn_genes
+# coad_deseq2_ifn_overlap <- intersect(coad_deseq2_test$up_genes, ifn_genes)
+# 
+# # 3. Check the results
+# print(paste("Number of overlapping IFN genes:", length(coad_deseq2_ifn_overlap)))
+# print(coad_deseq2_ifn_overlap)
+
+# Check overlap with brca up genes  
+intersect(coad_deseq2_test$up_genes, brca_deseq2_test$up_genes)
+
+
+
+
+```
+
+
+# Predictive signature 
+# 1) Model training
+```{r}
+model_results_list <- list()
+```
+
+## BRCA
+```{r}
+
+length(brca_deseq2_test$up_genes)
+# 104
+
+brca_vst_transform <- vst(brca_deseq2_test$dds, blind = TRUE)
+brca_vst_counts <- assay(brca_vst_transform)
+dim(brca_vst_counts)
+# [1] 39322    30 - 39,322 genes and 30 samples
+
+
+
+
+# 1. Map the Ensembl IDs in brca_vst_counts to Symbols using existing res_df
+# Using match ensures the order remains identical to the matrix columns
+gene_symbols <- brca_deseq2_test$res_df$gene_name[match(rownames(brca_vst_counts), rownames(brca_deseq2_test$res_df))]
+rownames(brca_vst_counts) <- gene_symbols
+
+
+# 2. Subset to the 104 genes (now that names match) and clean NAs
+brca_vst_sig_de_genes <- brca_vst_counts[rownames(brca_vst_counts) %in% brca_deseq2_test$up_genes, ]
+brca_vst_sig_de_genes <- brca_vst_sig_de_genes[!is.na(rownames(brca_vst_sig_de_genes)), ]
+dim(brca_vst_sig_de_genes)
+# [1] 104  30
+
+# Align Labels and Run LOOCV______####
+
+# 3. Setup labels (Engager = 1, Non-Engager = 0) 
+# colData is already aligned to the matrix columns
+y <- ifelse(colData(brca_deseq2_test$dds)$engager_group == "engager", 1, 0)
+X <- t(brca_vst_sig_de_genes) # glmnet requires samples as rows
+n_samples <- nrow(X)
+brca_predicted_probs <- numeric(n_samples)
+
+# LOOCV Loop for 104 genes____####
+set.seed(42) # For reproducibility in cv.glmnet folds
+#set.seed(7) # Trying different seeds to test robusness
+for(i in 1:n_samples) {
+  X_train <- X[-i, ]
+  y_train <- y[-i]
+  X_test  <- X[i, , drop = FALSE]
+  
+  # alpha=1 for LASSO; binomial for logistic
+  # Using 5 folds for internal CV because training N is small (28)
+  cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
+  
+  # Predict probability for the held-out sample
+  brca_predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
+}
+
+# Changing up seeds to check for robustness of AUC and pearson corr values since the groups are imbalanced (see notes)
+seeds <- 1:50
+brca_seed_results <- map_dfr(seeds, function(s) {
+  set.seed(s)
+  probs <- numeric(n_samples)
+  ok <- TRUE
+  for (i in 1:n_samples) {
+    fit <- tryCatch(
+      cv.glmnet(X[-i, ], y[-i], family = "binomial", alpha = 1, nfolds = 5),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) { ok <- FALSE; break }
+    probs[i] <- predict(fit, X[i, , drop = FALSE], s = "lambda.min", type = "response")
+  }
+  if (!ok) return(NULL)
+  tibble(seed = s,
+         auc = as.numeric(auc(roc(y, probs, quiet = TRUE))),
+         pearson = cor(probs, y))
+})
+
+brca_seed_results %>% summarise(
+  auc_mean = mean(auc), auc_sd = sd(auc), auc_min = min(auc), auc_max = max(auc),
+  r_mean = mean(pearson), r_sd = sd(pearson)
+)
+
+# # A tibble: 1 × 6
+#   auc_mean auc_sd auc_min auc_max r_mean   r_sd
+#      <dbl>  <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
+# 1    0.934 0.0334   0.876       1  0.792 0.0207
+
+# Evaluation and Plotting_____####
+
+library(pROC)
+auc_val <- as.numeric(auc(roc(y, brca_predicted_probs, quiet = TRUE)))
+cor_val <- cor(brca_predicted_probs, y)
+
+
+results_df <- data.frame(
+  true_label = factor(y, labels = c("Non-Engager", "Engager")),
+  pred_prob = brca_predicted_probs
+)
+
+# Save results_df for brca
+model_results_list$brca <- results_df
+
+# Boxplot with pearson correlation ####
+# 2. Map colors directly by position: 1st level (Non-Engager) = blue, 2nd level (Engager) = red
+lasso_boxplot <- ggplot(model_results_list$brca, aes(x = true_label, y = pred_prob, fill = true_label)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
+  geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
+  theme_minimal() +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_color_manual(values = c("blue", "red")) +
+  labs(
+    title = paste0("BRCA LOOCV Across ",length(brca_deseq2_test$up_genes), " DE Genes (AUC = ", round(auc_val, 3), ")"),
+    subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
+    y = "Predicted Probability of Engager Status",
+    x = NULL
+  ) +
+  theme(legend.position = "none", 
+        plot.title = element_text(face = "bold", size = 10),
+        plot.subtitle = element_text(size = 9)) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
+
+ggsave(
+  filename = "gmm_grouping/model_plots/brca_lasso_boxplot_gmm.png", 
+  plot = lasso_boxplot, 
+  width = 5.5,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+
+# ROC Plot ####
+# Calculate the ROC object
+# Ensures "Engager" is treated as the positive class
+roc_obj <- roc(model_results_list$brca$true_label, model_results_list$brca$pred_prob, levels = c("Non-Engager", "Engager"))
+
+# Extract coordinates for ggplot
+roc_data <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  #geom_line(color = "red", size = 1) +
+  geom_path(color = "red", size = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  theme_minimal() +
+  labs(
+    title = paste0("ROC Curve: BRCA LOOCV Across ", length(brca_deseq2_test$up_genes), " DE Genes"),
+    subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave(
+  filename = "gmm_grouping/model_plots/brca_lasso_roc_curve_gmm.png", 
+  plot = roc_plot, 
+  width = 6,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+
+# PR curve ####
+# Calculate the pr object
+brca_pr_obj <- pr.curve(
+  scores.class0 = model_results_list$brca %>% 
+    filter(true_label == "Engager") %>% 
+    pull(pred_prob),
+  scores.class1 = model_results_list$brca %>% 
+    filter(true_label == "Non-Engager") %>% 
+    pull(pred_prob),
+  curve = TRUE
+)
+
+pr_plot <- as.data.frame(brca_pr_obj$curve) %>% 
+  setNames(c("recall", "precision", "threshold")) %>% 
+  ggplot(aes(x = recall, y = precision)) +
+  geom_path(color = "blue", linewidth = 1) + 
+  theme_minimal() +
+  labs(
+    title = paste0("Precision-Recall Curve: BRCA LOOCV Across ",length(brca_deseq2_test$up_genes), " DE Genes"),
+    subtitle = paste0("PR AUC = ", round(brca_pr_obj$auc.integral, 3)),
+    x = "Recall (True Positive Rate)",
+    y = "Precision (Positive Predictive Value)"
+  ) +
+  theme(plot.title = element_text(face = "bold")) +
+  geom_hline(
+    yintercept = sum(model_results_list$brca$true_label == "Engager") / nrow(model_results_list$brca), 
+    linetype = "dashed", color = "grey"
+  )
+
+ggsave(
+  filename = "gmm_grouping/model_plots/brca_lasso_pr_curve_gmm.png", 
+  plot = pr_plot, 
+  width = 7,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+
+```
+
+## COAD
+```{r}
+
+length(coad_deseq2_test$up_genes) # 57 up genes
+
+coad_vst_transform <- vst(coad_deseq2_test$dds, blind = TRUE)
+coad_vst_counts <- assay(coad_vst_transform)
+dim(coad_vst_counts)
+# [1] 36728    32
+
+
+# 1. Map the Ensembl IDs in coad_vst_counts to symbols using res_df
+# Using match ensures the order remains identical to the matrix columns
+coad_gene_symbols <- coad_deseq2_test$res_df$gene_name[match(rownames(coad_vst_counts), rownames(coad_deseq2_test$res_df))]
+rownames(coad_vst_counts) <- coad_gene_symbols
+
+
+# 2. Subset to the de genes (now that names match) and clean NAs
+coad_vst_sig_de_genes <- coad_vst_counts[rownames(coad_vst_counts) %in% coad_deseq2_test$up_genes, ]
+coad_vst_sig_de_genes <- coad_vst_sig_de_genes[!is.na(rownames(coad_vst_sig_de_genes)), ]
+dim(coad_vst_sig_de_genes)
+# [1] 57 32
+
+# Align Labels and Run LOOCV______####
+
+# 3. Setup labels (Engager = 1, Non-Engager = 0) 
+# colData is already aligned to the matrix columns
+y <- ifelse(colData(coad_deseq2_test$dds)$engager_group == "engager", 1, 0)
+X <- t(coad_vst_sig_de_genes) # glmnet requires samples as rows
+n_samples <- nrow(X)
+coad_predicted_probs <- numeric(n_samples)
+
+# LOOCV Loop for sig de genes____####
+set.seed(7) # For reproducibility in cv.glmnet folds
+for(i in 1:n_samples) {
+  X_train <- X[-i, ]
+  y_train <- y[-i]
+  X_test  <- X[i, , drop = FALSE]
+  
+  # alpha=1 for LASSO; binomial for logistic
+  # Using 5 folds for internal CV because training N is small (28)
+  cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
+  
+  # Predict probability for the held-out sample
+  coad_predicted_probs[i] <- predict(cv_fit, X_test, s = "lambda.min", type = "response")
+}
+
+seeds <- 1:50
+coad_seed_results <- map_dfr(seeds, function(s) {
+  set.seed(s)
+  probs <- numeric(n_samples)
+  ok <- TRUE
+  for (i in 1:n_samples) {
+    fit <- tryCatch(
+      cv.glmnet(X[-i, ], y[-i], family = "binomial", alpha = 1, nfolds = 5),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) { ok <- FALSE; break }
+    probs[i] <- predict(fit, X[i, , drop = FALSE], s = "lambda.min", type = "response")
+  }
+  if (!ok) return(NULL)
+  tibble(seed = s, auc = as.numeric(auc(roc(y, probs, quiet = TRUE))), pearson = cor(probs, y))
+})
+
+coad_seed_results %>% summarise(
+  auc_mean = mean(auc), auc_sd = sd(auc), auc_min = min(auc), auc_max = max(auc),
+  r_mean = mean(pearson), r_sd = sd(pearson)
+)
+#  auc_mean auc_sd auc_min auc_max r_mean   r_sd
+#      <dbl>  <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
+# 1    0.902 0.0389   0.821   0.968  0.657 0.0631
+
+# Evaluation and Plotting_____####
+
+# Boxplot with Pearson Correlation ####
+library(pROC)
+auc_val <- as.numeric(auc(roc(y, coad_predicted_probs, quiet = TRUE)))
+cor_val <- cor(coad_predicted_probs, y)
+
+results_df <- data.frame(
+  true_label = factor(y, labels = c("Non-Engager", "Engager")),
+  pred_prob = coad_predicted_probs
+)
+
+model_results_list$coad <- results_df
+rm(results_df)
+
+lasso_boxplot <- ggplot(model_results_list$coad, aes(x = true_label, y = pred_prob, fill = true_label)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.4, width = 0.5) +
+  geom_jitter(aes(color = true_label), width = 0.2, size = 2.5) +
+  theme_minimal() +
+  scale_fill_manual(values = c("Non-Engager" = "#4575b4", "Engager" = "#d73027")) +
+  scale_color_manual(values = c("Non-Engager" = "#4575b4", "Engager" = "#d73027")) +
+  labs(
+    title = paste0("COAD LOOCV Across ", length(coad_deseq2_test$up_genes), " DE Genes (AUC = ", round(auc_val, 3), ")"),
+    subtitle = paste0("Pearson Correlation: ", round(cor_val, 3)),
+    y = "Predicted Probability of Engager Status",
+    x = NULL
+  ) +
+  theme(legend.position = "none", 
+        plot.title = element_text(face = "bold", size = 10),
+        plot.subtitle = element_text(size = 9)) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
+
+ggsave(
+  filename = "gmm_grouping/model_plots/coad_lasso_boxplot.png", 
+  plot = lasso_boxplot, 
+  width = 5.5,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+
+
+# ROC curve
+# Calculate the ROC object
+# Ensures "Engager" is treated as the positive class
+roc_obj <- roc(model_results_list$coad$true_label, model_results_list$coad$pred_prob, levels = c("Non-Engager", "Engager"))
+
+# Extract coordinates for ggplot
+roc_data <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+# ROC plot ####
+roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  #geom_line(color = "red", size = 1) +
+  geom_path(color = "red", size = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  theme_minimal() +
+  labs(
+    title = paste0("ROC Curve: COAD LOOCV Across ", length(coad_deseq2_test$up_genes), " Genes"),
+    subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave(
+  filename = "gmm_grouping/model_plots/coad_lasso_roc_curve.png", 
+  plot = roc_plot, 
+  width = 6,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+# PR Curve ####
+# Calculate the pr object
+coad_pr_obj <- pr.curve(
+  scores.class0 = model_results_list$coad %>% 
+    filter(true_label == "Engager") %>% 
+    pull(pred_prob),
+  scores.class1 = model_results_list$coad %>% 
+    filter(true_label == "Non-Engager") %>% 
+    pull(pred_prob),
+  curve = TRUE
+)
+
+
+pr_plot <- as.data.frame(coad_pr_obj$curve) %>% 
+  setNames(c("recall", "precision", "threshold")) %>% 
+  ggplot(aes(x = recall, y = precision)) +
+  geom_path(color = "blue", linewidth = 1) + 
+  theme_minimal() +
+  labs(
+    title = paste0("Precision-Recall Curve: COAD LOOCV Across ", length(coad_deseq2_test$up_genes), " DE Genes"),
+    subtitle = paste0("PR AUC = ", round(coad_pr_obj$auc.integral, 3)),
+    x = "Recall (True Positive Rate)",
+    y = "Precision (Positive Predictive Value)"
+  ) +
+  theme(plot.title = element_text(face = "bold")) +
+  geom_hline(
+    yintercept = sum(model_results_list$coad$true_label == "Engager") / nrow(model_results_list$coad), 
+    linetype = "dashed", color = "grey"
+  )
+
+ggsave(
+  filename = "gmm_grouping/model_plots/coad_lasso_pr_curve.png", 
+  plot = pr_plot, 
+  width = 7,      # Width in inches
+  height = 5,     # Height in inches
+  units = "in",
+  dpi = 300       # 300 DPI is the print standard
+)
+
+
+```
+
+# 2) Gene signature to full TCGA RNA cohort
+## BRCA
+### Pull rnaseq data
+```{r}
+# Load full transcriptome and clinical data
+brca_full_data <- prepare_and_cache_rnaseq("BRCA", matched_only = FALSE)
+
+# Extract the metadata from the RNA-seq object
+brca_clinical_check <- as.data.frame(colData(brca_full_data$se))
+# Check if the vital_status and time columns are already there
+target_cols <- c("vital_status", "days_to_death", "days_to_last_follow_up")
+found_cols <- target_cols[target_cols %in% colnames(brca_clinical_check)]
+print(found_cols)
+
+brca_clinical <- brca_clinical_check
+rm(brca_clinical_check)
+
+
+```
+
+### vst normalize 
+To make sure gene expression values are the same scale as the N=30 training set
+```{r}
+# 1. Create the DESeq container for the full cohort
+brca_dds_full <- DESeqDataSetFromMatrix(
+    countData = brca_full_data$counts,
+    colData = brca_full_data$meta,
+    design = ~ 1 # Intercept only for population-wide normalization
+)
+
+# 2. Run vst
+# This will take ~10-15 minutes on 1,111 samples
+brca_vst_full <- vst(brca_dds_full, blind = TRUE)
+brca_mat_full <- assay(brca_vst_full)
+
+# 3. Map Gene IDs to Symbols
+# Ensuring the rownames match 104-gene model (e.g., RAP2C)
+rownames(brca_mat_full) <- rowData(brca_full_data$se)$gene_name[match(rownames(brca_mat_full), rowData(brca_full_data$se)$gene_id)]
+```
+
+### Get final model
+train on all 30 samples now that we know that the 104 genes are useful for predicting engager/non-engager status from the training set
+```{r}
+
+# 1. Train the Master Model on all 30 Discovery Samples
+brca_x_train_sig_de_genes <- t(brca_vst_sig_de_genes) 
+brca_y_labels_sig_de_genes <- y              
+
+set.seed(42)
+brca_model_sig_de_genes_final <- cv.glmnet(
+    x = brca_x_train_sig_de_genes, 
+    y = brca_y_labels_sig_de_genes, 
+    family = "binomial", 
+    alpha = 1, 
+    nfolds = 5
+)
+
+# 2. Extract the non-zero active weights for reference
+brca_final_weights <- as.matrix(coef(brca_model_sig_de_genes_final, s = "lambda.min"))
+brca_active_genes <- brca_final_weights[brca_final_weights[, 1] != 0, , drop = FALSE]
+print(brca_active_genes) # Every gene has a positive coefficient!
+
+# Save as tsv
+brca_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  write_tsv("~/gmm_grouping/model_plots/brca_lasso_gene_signature_gmm.tsv")
+
+# Get genes and weights ####
+brca_gene_signature_table <- brca_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  # Make table
+  gt() %>%
+  tab_header(
+    title = paste0("BRCA LASSO ", nrow(brca_active_genes)-1  ," Signature Coefficients"),
+    subtitle = paste0("Selected from", length(brca_deseq2_test$up_genes) ," Candidate DE Genes")
+  ) %>%
+  cols_label(
+    gene_symbol = "Gene Symbol",
+    coefficient = "LASSO Coefficient (β)"
+  ) %>%
+  fmt_number(
+    columns = coefficient,
+    decimals = 4
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(rows = gene_symbol == "(Intercept)")
+  ) %>%
+  tab_options(
+    table.width = px(400),
+    column_labels.background.color = "whitesmoke"
+  ) 
+
+brca_gene_signature_table
+
+
+
+
+# 3. Align the Validation Samples
+# Subsetting the large matrix using the exact row order of the discovery matrix
+brca_x_val_sig_de_genes <- t(brca_mat_full[rownames(brca_vst_sig_de_genes), ])
+
+# error in one of the 104 genes doesn't exist in the validation matrix (brca_mat_full). maybe an issue with gene annotations
+target_genes <- rownames(brca_vst_sig_de_genes)
+available_genes <- rownames(brca_mat_full)
+
+missing_genes <- setdiff(target_genes, available_genes)
+print(missing_genes) # None of the 14 signature genes are missing. every gene that has a coefficient is present in the full cohort and the model ignores the missing ones anyway
+# [1] "BLTP2"        "LOC124907763" "LOC100128317" "LINC02889"    "GALNT7-DT"    "FARS2-AS1"    "LOC100287808" "LOC124909423"
+
+# fix
+# 1. Extract the genes that are not missing those aren't in the signature anyway, transpose to patients-as-rows ####
+available_data <- brca_mat_full[rownames(brca_mat_full) %in% target_genes, ] %>% 
+  t()
+
+# 2. Create a zero-filled matrix for the missing genes ####
+missing_data <- matrix(
+  0, 
+  nrow = nrow(available_data), 
+  ncol = length(missing_genes), 
+  dimnames = list(rownames(available_data), missing_genes)
+)
+
+# 3. Bind them together and forcefully reorder columns to match the discovery set exactly ####
+brca_x_val_sig_de_genes <- cbind(available_data, missing_data)[, target_genes]
+
+# Confirm dimensions are 1095 rows, 104 columns
+dim(brca_x_val_sig_de_genes)
+
+# Clean up temporary debugging variables
+rm(target_genes, available_genes, missing_genes, available_data, missing_data)
+
+# 4. Generate the Engagement Probabilities ####
+brca_final_probs_sig_de_genes <- predict(
+  brca_model_sig_de_genes_final, 
+  newx = brca_x_val_sig_de_genes, 
+  s = "lambda.min", 
+  type = "response"
+)
+
+# 3. Consolidate into a tibble ####
+brca_engagement_scores <- tibble(
+  case_id = rownames(brca_final_probs_sig_de_genes),
+  engagement_prob = as.numeric(brca_final_probs_sig_de_genes)
+)
+
+# 4. Sanity Check ####
+# does  Model successfully identified extremes (near 0 and near 1)
+summary(brca_engagement_scores$engagement_prob) 
+
+brca_engagement_scores %>%
+  mutate(bin = cut(engagement_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
+  count(bin)
+
+# A tibble: 10 × 2
+#    bin           n
+#    <fct>     <int>
+#  1 [0,0.1]    1035
+#  2 (0.1,0.2]    15
+#  3 (0.2,0.3]     7
+#  4 (0.3,0.4]     3
+#  5 (0.4,0.5]     2
+#  6 (0.5,0.6]     4
+#  7 (0.6,0.7]     3
+#  8 (0.7,0.8]     6
+#  9 (0.8,0.9]     7
+# 10 (0.9,1]      13
+
+brca_engagement_scores %>%
+  summarise(
+    n_total = n(),
+    n_above_0.5 = sum(engagement_prob > 0.5),
+    n_above_0.25 = sum(engagement_prob > 0.25),
+    n_above_0.1 = sum(engagement_prob > 0.1)
+  )
+
+# A tibble: 1 × 4
+#   n_total n_above_0.5 n_above_0.25 n_above_0.1
+#     <int>       <int>        <int>       <int>
+# 1    1095          33           41          60
+
+# the model scored 1035 patients low and a small group of high scorers with basically nothing in between. 
+
+```
+
+### Histogram and density plot of engager status probabilities to see if there are multiple populations
+```{r}
+ggplot(brca_engagement_scores, aes(x = engagement_prob)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 40, fill = "steelblue", color = "black", alpha = 0.7) +
+  geom_density(color = "darkred", linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Engager Status Probabilities in BRCA",
+    x = "Probability of Engager Status (0 to 1)",
+    y = "Density"
+  )
+
+# transform y axis so you can see the small population of engagers showing it is bimodal with very few samples in between
+ggplot(brca_engagement_scores, aes(x = engagement_prob)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "black", alpha = 0.7) +
+  scale_y_sqrt() +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Engager Status Probabilities in BRCA",
+    x = "Probability of Engager Status (0 to 1)",
+    y = "Count (sqrt scale)"
+  ) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black")
+
+```
+
+## COAD
+### Pull rnaseq data
+```{r}
+# Load full transcriptome and clinical data
+coad_full_data <- prepare_and_cache_rnaseq("COAD", matched_only = FALSE)
+
+# Extract the metadata from the RNA-seq object
+coad_clinical_check <- as.data.frame(colData(coad_full_data$se))
+# Check if the vital_status and time columns are already there
+target_cols <- c("vital_status", "days_to_death", "days_to_last_follow_up")
+found_cols <- target_cols[target_cols %in% colnames(coad_clinical_check)]
+print(found_cols)
+
+coad_clinical <- coad_clinical_check
+rm(coad_clinical_check)
+
+
+```
+
+### vst normalize 
+To make sure gene expression values are the same scale as the N=32 training set
+```{r}
+# 1. Create the DESeq container for the full cohort
+coad_dds_full <- DESeqDataSetFromMatrix(
+    countData = coad_full_data$counts,
+    colData = coad_full_data$meta,
+    design = ~ 1 # Intercept only for population-wide normalization
+)
+
+# 2. Run vst
+coad_vst_full <- vst(coad_dds_full, blind = TRUE)
+coad_mat_full <- assay(coad_vst_full)
+
+# 3. Map Gene IDs to Symbols
+# Ensuring the rownames match 57 sig de genes 
+rownames(coad_mat_full) <- rowData(coad_full_data$se)$gene_name[match(rownames(coad_mat_full), rowData(coad_full_data$se)$gene_id)]
+```
+
+### Get final model
+train on all 17 samples now that we know that the de genes are useful for predicting engager/non-engager status from the training set
+```{r}
+# 1. Train the Master Model on all 32 Discovery Samples
+coad_x_train_sig_de_genes <- t(coad_vst_sig_de_genes) 
+coad_y_labels <- y               
+
+set.seed(42)
+coad_model_sig_de_genes_final <- cv.glmnet(
+    x = coad_x_train_sig_de_genes, 
+    y = coad_y_labels, 
+    family = "binomial", 
+    alpha = 1, 
+    nfolds = 5
+)
+
+# 2. Extract the non-zero active weights for reference
+coad_final_weights <- as.matrix(coef(coad_model_sig_de_genes_final, s = "lambda.min"))
+coad_active_genes <- coad_final_weights[coad_final_weights[, 1] != 0, , drop = FALSE]
+print(coad_active_genes) 
+
+#               lambda.min
+# (Intercept) -28.04799122
+# KIF20A        0.28615708
+# SLCO1B1       0.02209004
+# MFSD9         0.46172705
+# SAP130        0.75316390
+# POU4F1        0.92415892
+# SLCO4C1       0.13271767
+# NCAPD2P1      0.95018120
+# RAMACL        0.21975924
+
+# Save as tsv
+coad_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  write_tsv("gmm_grouping/model_plots/coad_lasso_gene_signature_gmm.tsv")
+
+# Get genes and weights ####
+coad_gene_signature_table <- coad_active_genes %>% 
+  as.data.frame() %>% 
+  rename(coefficient = 1) %>% 
+  mutate(gene_symbol = rownames(.)) %>% 
+  select(gene_symbol, coefficient) %>% 
+  arrange(desc(abs(coefficient))) %>% 
+  # Make table
+  gt() %>%
+  tab_header(
+    title = paste0("COAD ", nrow(coad_active_genes)-1,"-Gene LASSO Signature Coefficients"),
+    subtitle = paste0("Selected from ",length(coad_deseq2_test$up_genes), " Candidate DE Genes (BRCA Cohort)")
+  ) %>%
+  cols_label(
+    gene_symbol = "Gene Symbol",
+    coefficient = "LASSO Coefficient (β)"
+  ) %>%
+  fmt_number(
+    columns = coefficient,
+    decimals = 4
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(rows = gene_symbol == "(Intercept)")
+  ) %>%
+  tab_options(
+    table.width = px(400),
+    column_labels.background.color = "whitesmoke"
+  ) 
+
+coad_gene_signature_table
+
+
+
+# 3. Align the Validation Samples
+target_genes <- rownames(coad_vst_sig_de_genes)
+available_genes <- rownames(coad_mat_full)
+
+missing_genes <- setdiff(target_genes, available_genes)
+print(paste("Missing genes:", paste(missing_genes, collapse=", ")))
+# [1] "Missing genes: LOC105373383, LOC100506207"
+
+# 1. Extract the genes we DO have, transpose to patients-as-rows ####
+available_data <- coad_mat_full[rownames(coad_mat_full) %in% target_genes, ] %>% 
+  t()
+
+# 2. Create a zero-filled matrix for the missing genes (if any) ####
+if(length(missing_genes) > 0) {
+  missing_data <- matrix(
+    0, 
+    nrow = nrow(available_data), 
+    ncol = length(missing_genes), 
+    dimnames = list(rownames(available_data), missing_genes)
+  )
+  # 3. Bind them together and forcefully reorder columns to match the discovery set exactly ####
+  coad_x_val_sig_de_genes <- cbind(available_data, missing_data)[, target_genes]
+} else {
+  coad_x_val_sig_de_genes <- available_data[, target_genes]
+}
+
+# Confirm dimensions 
+dim(coad_x_val_sig_de_genes)
+# [1] 458  57
+
+# Clean up temporary debugging variables
+rm(target_genes, available_genes, missing_genes, available_data)
+if(exists("missing_data")) rm(missing_data)
+
+# 4. Generate the Engagement Probabilities ####
+coad_final_probs_sig_de_genes <- predict(
+  coad_model_sig_de_genes_final, 
+  newx = coad_x_val_sig_de_genes, 
+  s = "lambda.min", 
+  type = "response"
+)
+
+# 5. Consolidate into a clean, tidy tibble ####
+coad_engagement_scores <- tibble(
+  case_id = rownames(coad_final_probs_sig_de_genes),
+  engagement_prob = as.numeric(coad_final_probs_sig_de_genes)
+)
+
+# 6. Sanity Check ####
+summary(coad_engagement_scores$engagement_prob)
+# > summary(coad_engagement_scores$engagement_prob)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.01064 0.07856 0.13764 0.20731 0.26790 0.94466 
+```
+
+### Histogram and density plot of engager status probabilities to see if there are multiple populations
+looks like there are two populations at the extremes. will take the extreme populations and not cutoff by the median
+```{r}
+ggplot(coad_engagement_scores, aes(x = engagement_prob)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 40, fill = "steelblue", color = "black", alpha = 0.7) +
+  geom_density(color = "darkred", linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Engager Status Probabilities in COAD",
+    x = "Probability of Engager Status",
+    y = "Density"
+  )
+
+coad_engagement_scores %>%
+  mutate(bin = cut(engagement_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
+  count(bin)
+
+coad_engagement_scores %>%
+  summarise(
+    n_total = n(),
+    n_above_0.5 = sum(engagement_prob > 0.5),
+    n_above_0.25 = sum(engagement_prob > 0.25)
+  )
+
+#  A tibble: 1 × 3
+#   n_total n_above_0.5 n_above_0.25
+#     <int>       <int>        <int>
+# 1     458          39          121
+
+coad_engagement_scores %>% summarise(n_above_0.5 = sum(engagement_prob > 0.5))
+# 39 above 0.5
+```
+
+
+# 3) Prognostic Analysis (survival curves, coxph)
+## BRCA
+### Survival curves
+Get populations by using a threshold for KM curves but note that the coxph model will use the continuous probabilities (refer to notes)
+```{r}
+
+# NOT DOING - 1. Define the 25% (quartile) cutoffs
+# lower_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.25)
+# upper_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.75)
+
+# 2. Isolate extremes, strictly filter for primary tumors, and merge
+brca_survival_data <- brca_engagement_scores %>%
+  #filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
+  mutate(
+    #engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
+    patient_id = substr(case_id, 1, 12),
+    sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
+  ) %>%
+  # Safeguard 1: keep only Primary Solid Tumors ("01")
+  filter(sample_type == "01") %>%
+  # Safeguard 2: drop replicate vials (A vs B)
+  distinct(patient_id, .keep_all = TRUE) %>%
+  
+  # Join and build survival variables
+  inner_join(
+    brca_clinical %>% distinct(submitter_id, .keep_all = TRUE), 
+    by = c("patient_id" = "submitter_id")
+  ) %>%
+  mutate(
+    os_time = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
+    os_status = if_else(vital_status == "Dead", 1, 0)
+  ) %>%
+  filter(!is.na(os_time) & os_time > 0 & !is.na(os_status))
+
+# 3. Verify the final dataset
+dim(brca_survival_data)
+#  [1] 1012  100 - 1012 patients with survival data
+
+# Check how cutting the probabilities would split the 1012 at two thresholds
+brca_survival_data %>%
+  summarise(
+    above_0.5 = sum(engagement_prob > 0.5)
+    #above_0.1 = sum(engagement_prob > 0.1)
+  )
+# # A tibble: 1 × 1
+#   above_0.5
+#       <int>
+# 1        30
+
+#table(brca_survival_data$engagement_group, brca_survival_data$os_status)
+# Non-Engager 208  38
+
+
+
+```
+
+### Plot KM curves
+cut at 0.5 for the KM curves plot (coxph will be continuous and done separately)
+```{r}
+
+brca_survival_data <- brca_survival_data %>%
+  mutate(engagement_group = factor(
+    if_else(engagement_prob > 0.5, "Engager", "Non-Engager"),
+    levels = c("Engager", "Non-Engager")
+  ))
+
+# See percentage of censored data
+brca_survival_data %>%
+  group_by(engagement_group) %>%
+  summarize(
+    total_n = n(),
+    deaths = sum(os_status == 1),
+    censored = sum(os_status == 0),
+    percent_censored = round((censored / total_n) * 100, 1)
+  )
+
+# # A tibble: 2 × 5
+#   engagement_group total_n deaths censored percent_censored
+#   <fct>              <int>  <int>    <int>            <dbl>
+# 1 Engager               30      5       25             83.3
+# 2 Non-Engager          982    144      838             85.3
+
+
+# 1. Fit the survival model using your existing variable name
+brca_survival_data$engagement_group <- factor(
+  brca_survival_data$engagement_group, 
+  levels = c("Engager", "Non-Engager")
+)
+brca_km_fit <- survfit(Surv(os_time, os_status) ~ engagement_group, data = brca_survival_data)
+
+
+# 2. Generate the Kaplan-Meier Plot
+brca_surv_plot <- ggsurvplot(
+  brca_km_fit,
+  data = brca_survival_data,
+  pval = TRUE,
+  risk.table = TRUE,
+  palette = c("#E41A1C", "#377EB8"), 
+  title = "BRCA Overall Survival: Top vs Bottom Quartile",
+  xlab = "Time (Days)",
+  ylab = "Survival Probability",
+  
+  # legend position and labels
+  legend = "top",
+  legend.title = "Status",
+  legend.labs = c("Engager", "Non-Engager"),
+  
+  # Granular time axis
+  break.time.by = 1000,
+  ggtheme = theme_minimal()
+)
+
+png("~/gmm_grouping/survival/brca_survplot_gmm.png", width = 7, height = 7, units = "in", res = 300)
+print(brca_surv_plot)
+dev.off()
+
+```
+
+### CoxPH
+#### Continuous cox
+```{r}
+brca_cox_model <- coxph(
+  Surv(os_time, os_status) ~ engagement_prob + ajcc_pathologic_stage + age_at_index,
+  data = brca_survival_data
+)
+summary(brca_cox_model)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_prob + 
+#     ajcc_pathologic_stage + age_at_index, data = brca_survival_data)
+# 
+#   n= 960, number of events= 104 
+#    (52 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_prob                  5.495e-01  1.732e+00  6.708e-01  0.819   0.4127    
+# ajcc_pathologic_stageStage IA   -6.445e-01  5.249e-01  6.538e-01 -0.986   0.3242    
+# ajcc_pathologic_stageStage IB   -1.453e+01  4.878e-07  2.423e+03 -0.006   0.9952    
+# ajcc_pathologic_stageStage II    5.786e-01  1.784e+00  1.058e+00  0.547   0.5843    
+# ajcc_pathologic_stageStage IIA   1.598e-01  1.173e+00  3.606e-01  0.443   0.6577    
+# ajcc_pathologic_stageStage IIB   2.440e-01  1.276e+00  3.803e-01  0.641   0.5212    
+# ajcc_pathologic_stageStage IIIA  7.470e-01  2.111e+00  3.943e-01  1.895   0.0581 .  
+# ajcc_pathologic_stageStage IIIB  8.122e-01  2.253e+00  5.479e-01  1.483   0.1382    
+# ajcc_pathologic_stageStage IIIC  6.999e-01  2.014e+00  5.942e-01  1.178   0.2388    
+# ajcc_pathologic_stageStage IV    2.549e+00  1.279e+01  4.072e-01  6.259 3.88e-10 ***
+# ajcc_pathologic_stageStage X     7.106e-01  2.035e+00  7.761e-01  0.916   0.3599    
+# age_at_index                     3.775e-02  1.038e+00  8.408e-03  4.490 7.13e-06 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_prob                 1.732e+00  5.773e-01    0.4652     6.451
+# ajcc_pathologic_stageStage IA   5.249e-01  1.905e+00    0.1457     1.891
+# ajcc_pathologic_stageStage IB   4.878e-07  2.050e+06    0.0000       Inf
+# ajcc_pathologic_stageStage II   1.784e+00  5.607e-01    0.2244    14.177
+# ajcc_pathologic_stageStage IIA  1.173e+00  8.523e-01    0.5787     2.379
+# ajcc_pathologic_stageStage IIB  1.276e+00  7.835e-01    0.6056     2.690
+# ajcc_pathologic_stageStage IIIA 2.111e+00  4.738e-01    0.9746     4.571
+# ajcc_pathologic_stageStage IIIB 2.253e+00  4.439e-01    0.7698     6.593
+# ajcc_pathologic_stageStage IIIC 2.014e+00  4.966e-01    0.6283     6.453
+# ajcc_pathologic_stageStage IV   1.279e+01  7.818e-02    5.7577    28.413
+# ajcc_pathologic_stageStage X    2.035e+00  4.913e-01    0.4446     9.317
+# age_at_index                    1.038e+00  9.630e-01    1.0215     1.056
+# 
+# Concordance= 0.772  (se = 0.025 )
+# Likelihood ratio test= 74.33  on 12 df,   p=5e-11
+# Wald test            = 99.58  on 12 df,   p=7e-16
+# Score (logrank) test = 155  on 12 df,   p=<2e-16
+
+brca_survival_data$engagement_group <- relevel(
+  factor(brca_survival_data$engagement_group), ref = "Non-Engager"
+)
+
+brca_cox_grouped <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index,
+  data = brca_survival_data
+)
+summary(brca_cox_grouped)
+
+
+```
+
+#### IGNORE -- OLD, using quartile analysis code here where I used a quartile cutoff of probability scores. didn't delete but IGNORE
+with covariates
+```{r}
+
+# Force Non-Engager to be the reference group (baseline)
+brca_survival_data$engagement_group <- relevel(factor(brca_survival_data$engagement_group), ref = "Non-Engager")
+
+# 1. Fit a Multivariate Cox Model
+# include clinical factors
+brca_cox_model <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index, 
+  data = brca_survival_data
+)
+
+# 2. Look at the result
+summary(brca_cox_model)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     ajcc_pathologic_stage + age_at_index, data = brca_survival_data)
+# 
+#   n= 473, number of events= 55 
+#    (27 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_groupEngager          6.711e-01  1.956e+00  2.965e-01  2.264 0.023596 *  
+# ajcc_pathologic_stageStage IA   -9.873e-02  9.060e-01  8.751e-01 -0.113 0.910173    
+# ajcc_pathologic_stageStage IB   -1.631e+01  8.250e-08  1.045e+04 -0.002 0.998755    
+# ajcc_pathologic_stageStage II    2.516e+00  1.238e+01  1.152e+00  2.185 0.028915 *  
+# ajcc_pathologic_stageStage IIA  -6.014e-02  9.416e-01  5.867e-01 -0.103 0.918357    
+# ajcc_pathologic_stageStage IIB   2.870e-01  1.332e+00  5.848e-01  0.491 0.623613    
+# ajcc_pathologic_stageStage IIIA  7.354e-01  2.086e+00  6.038e-01  1.218 0.223199    
+# ajcc_pathologic_stageStage IIIB  1.234e+00  3.434e+00  7.112e-01  1.735 0.082789 .  
+# ajcc_pathologic_stageStage IIIC -1.624e+01  8.881e-08  3.274e+03 -0.005 0.996044    
+# ajcc_pathologic_stageStage IV    2.613e+00  1.364e+01  6.019e-01  4.341 1.42e-05 ***
+# ajcc_pathologic_stageStage X     2.155e+00  8.624e+00  1.136e+00  1.897 0.057803 .  
+# age_at_index                     3.709e-02  1.038e+00  1.093e-02  3.392 0.000693 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager         1.956e+00  5.112e-01    1.0942     3.498
+# ajcc_pathologic_stageStage IA   9.060e-01  1.104e+00    0.1630     5.035
+# ajcc_pathologic_stageStage IB   8.250e-08  1.212e+07    0.0000       Inf
+# ajcc_pathologic_stageStage II   1.238e+01  8.079e-02    1.2953   118.280
+# ajcc_pathologic_stageStage IIA  9.416e-01  1.062e+00    0.2982     2.973
+# ajcc_pathologic_stageStage IIB  1.332e+00  7.505e-01    0.4235     4.192
+# ajcc_pathologic_stageStage IIIA 2.086e+00  4.793e-01    0.6389     6.813
+# ajcc_pathologic_stageStage IIIB 3.434e+00  2.912e-01    0.8520    13.841
+# ajcc_pathologic_stageStage IIIC 8.881e-08  1.126e+07    0.0000       Inf
+# ajcc_pathologic_stageStage IV   1.364e+01  7.330e-02    4.1931    44.388
+# ajcc_pathologic_stageStage X    8.624e+00  1.160e-01    0.9312    79.867
+# age_at_index                    1.038e+00  9.636e-01    1.0158     1.060
+# 
+# Concordance= 0.783  (se = 0.035 )
+# Likelihood ratio test= 58.52  on 12 df,   p=4e-08
+# Wald test            = 53.3  on 12 df,   p=4e-07
+# Score (logrank) test = 107.4  on 12 df,   p=<2e-16
+
+# Add subtype and hormone receptor status as covariates ####
+# Subtypes_____________________
+# Look for the right columns
+TCGAquery_subtype(tumor = "brca") %>% View()
+  colnames(.)
+  
+# Pull official TCGA-BRCA molecular subtypes
+brca_subtypes <- TCGAquery_subtype(tumor = "brca") %>%
+  dplyr::select(patient, subtype = BRCA_Subtype_PAM50)
+
+
+# Hormone receptor status_________________________
+# 1. Query for the Biotab (text table) version of the clinical data
+query_brca_biotab <- GDCquery(
+    project = "TCGA-BRCA",
+    data.category = "Clinical",
+    data.type = "Clinical Supplement",
+    data.format = "BCR Biotab"
+)
+
+# 2. Download the small .txt files (takes seconds)
+GDCdownload(query_brca_biotab)
+
+# 3. Load the tables into a list
+brca_biotab_list <- GDCprepare(query_brca_biotab)
+
+# 4. Extract the specific patient clinical table
+# This is where the hormone receptor status is stored
+brca_hr_status_data <- brca_biotab_list$clinical_patient_brca
+
+# Look for the receptor status columns
+colnames(brca_hr_status_data)[grep("er_status|pr_status|her2_status", colnames(brca_hr_status_data), ignore.case = TRUE)]
+
+# Prepare the clean HR status table
+# 1. Clean the HR table by keeping only real TCGA barcodes
+brca_hr_clean <- brca_hr_status_data %>%
+  filter(grepl("^TCGA-", bcr_patient_barcode)) %>%
+  dplyr::select(
+    patient_id = bcr_patient_barcode, 
+    er_status = er_status_by_ihc, 
+    pr_status = pr_status_by_ihc, 
+    her2_status = her2_status_by_ihc
+  )
+
+# Count how many times each patient appears
+dupe_check <- brca_hr_clean %>%
+  count(patient_id) %>%
+  filter(n > 1)
+print(dupe_check)
+
+
+# Join to survival data
+brca_survival_adj <- brca_survival_data %>%
+  left_join(brca_hr_clean, by = "patient_id")
+
+# Check the first few rows to see the new columns
+head(brca_survival_adj)
+
+# Check the distribution of ER status
+table(brca_survival_adj$er_status, useNA = "always")
+# Not Evaluated]        Negative        Positive            <NA> 
+#              25             123             352               0 
+
+# Check Progesterone Receptor status
+table(brca_survival_adj$pr_status, useNA = "always")
+# [Not Evaluated]   Indeterminate        Negative        Positive            <NA> 
+#              26               1             179             294               0 
+
+# Check HER2 status
+table(brca_survival_adj$her2_status, useNA = "always")
+# [Not Available] [Not Evaluated]       Equivocal   Indeterminate        Negative        Positive            <NA> 
+#               5              86              85               7             236              81               0 
+
+# Only get patients that have definitive positive and negative for multivariate coxph model
+# Create a clean subset for the multivariate model
+brca_survival_final <- brca_survival_adj %>%
+  # Filter to keep only definitive clinical results for all three
+  filter(
+    er_status %in% c("Positive", "Negative"),
+    pr_status %in% c("Positive", "Negative"),
+    her2_status %in% c("Positive", "Negative")
+  ) %>%
+  # Convert to factors so the model treats 'Negative' as the baseline
+  mutate(
+    er_status = factor(er_status, levels = c("Negative", "Positive")),
+    pr_status = factor(pr_status, levels = c("Negative", "Positive")),
+    her2_status = factor(her2_status, levels = c("Negative", "Positive"))
+  )
+nrow(brca_survival_final)
+
+# Ensure engagement_group has the correct baseline
+brca_survival_final$engagement_group <- relevel(factor(brca_survival_final$engagement_group), ref = "Non-Engager")
+
+# Run the final adjusted model
+brca_cox_triple_adj <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + er_status + pr_status + her2_status + ajcc_pathologic_stage + age_at_index, 
+  data = brca_survival_final
+)
+
+# Generate the results
+summary(brca_cox_triple_adj)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     er_status + pr_status + her2_status + ajcc_pathologic_stage + 
+#     age_at_index, data = brca_survival_final)
+# 
+#   n= 304, number of events= 28 
+#    (11 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_groupEngager          1.111e+00  3.038e+00  5.082e-01  2.186 0.028784 *  
+# er_statusPositive               -1.410e+00  2.442e-01  7.800e-01 -1.807 0.070723 .  
+# pr_statusPositive                6.139e-02  1.063e+00  7.269e-01  0.084 0.932695    
+# her2_statusPositive              6.348e-02  1.066e+00  4.650e-01  0.137 0.891410    
+# ajcc_pathologic_stageStage IA    6.282e-01  1.874e+00  1.256e+00  0.500 0.616966    
+# ajcc_pathologic_stageStage II   -1.712e+01  3.656e-08  3.475e+04  0.000 0.999607    
+# ajcc_pathologic_stageStage IIA   9.921e-02  1.104e+00  8.165e-01  0.121 0.903298    
+# ajcc_pathologic_stageStage IIB   6.193e-02  1.064e+00  9.139e-01  0.068 0.945974    
+# ajcc_pathologic_stageStage IIIA  1.130e+00  3.095e+00  8.599e-01  1.314 0.188869    
+# ajcc_pathologic_stageStage IIIB  1.594e+00  4.925e+00  9.485e-01  1.681 0.092795 .  
+# ajcc_pathologic_stageStage IIIC -1.644e+01  7.277e-08  6.089e+03 -0.003 0.997846    
+# ajcc_pathologic_stageStage IV    3.071e+00  2.156e+01  9.179e-01  3.345 0.000822 ***
+# ajcc_pathologic_stageStage X    -1.680e+01  5.054e-08  2.664e+04 -0.001 0.999497    
+# age_at_index                     4.382e-02  1.045e+00  1.674e-02  2.617 0.008870 ** 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager         3.038e+00  3.292e-01   1.12198     8.226
+# er_statusPositive               2.442e-01  4.095e+00   0.05295     1.126
+# pr_statusPositive               1.063e+00  9.405e-01   0.25580     4.420
+# her2_statusPositive             1.066e+00  9.385e-01   0.42834     2.651
+# ajcc_pathologic_stageStage IA   1.874e+00  5.336e-01   0.15985    21.974
+# ajcc_pathologic_stageStage II   3.656e-08  2.735e+07   0.00000       Inf
+# ajcc_pathologic_stageStage IIA  1.104e+00  9.056e-01   0.22287     5.472
+# ajcc_pathologic_stageStage IIB  1.064e+00  9.399e-01   0.17741     6.380
+# ajcc_pathologic_stageStage IIIA 3.095e+00  3.231e-01   0.57377    16.697
+# ajcc_pathologic_stageStage IIIB 4.925e+00  2.030e-01   0.76738    31.609
+# ajcc_pathologic_stageStage IIIC 7.277e-08  1.374e+07   0.00000       Inf
+# ajcc_pathologic_stageStage IV   2.156e+01  4.639e-02   3.56692   130.300
+# ajcc_pathologic_stageStage X    5.054e-08  1.979e+07   0.00000       Inf
+# age_at_index                    1.045e+00  9.571e-01   1.01106     1.080
+# 
+# Concordance= 0.857  (se = 0.031 )
+# Likelihood ratio test= 36.51  on 14 df,   p=9e-04
+# Wald test            = 29.98  on 14 df,   p=0.008
+# Score (logrank) test = 57.77  on 14 df,   p=3e-07
+# 
+
+# PROBLEM 
+# coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# ajcc_pathologic_stageStage II   -1.712e+01  3.656e-08  3.475e+04  0.000 0.999607
+# the standard error for Stage II (as well as stage IIIC and stage X) is very high indicating zero events (deaths) happened in this subgroup. will collapse the groups to Stage 1,2,3,4,5
+
+# 1. Collapse sub-stages into major stages to fix zero-event categories
+brca_survival_stable <- brca_survival_final %>%
+  mutate(stage_simple = case_when(
+    grepl("Stage I$|Stage IA|Stage IB", ajcc_pathologic_stage) ~ "Stage_I",
+    grepl("Stage II$|Stage IIA|Stage IIB", ajcc_pathologic_stage) ~ "Stage_II",
+    grepl("Stage III$|Stage IIIA|Stage IIIB|Stage IIIC", ajcc_pathologic_stage) ~ "Stage_III",
+    grepl("Stage IV", ajcc_pathologic_stage) ~ "Stage_IV",
+    TRUE ~ NA_character_
+  )) %>%
+  # Filter out 'Unknown' or 'Stage X' which have no prognostic meaning
+  filter(!is.na(stage_simple)) %>%
+  mutate(stage_simple = factor(stage_simple, levels = c("Stage_I", "Stage_II", "Stage_III", "Stage_IV")))
+
+# 2. Run the stable multivariate Cox model
+brca_cox_stable <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + er_status + pr_status + her2_status + stage_simple + age_at_index, 
+  data = brca_survival_stable
+)
+
+# 3. View Summary
+summary(brca_cox_stable)
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     er_status + pr_status + her2_status + stage_simple + age_at_index, 
+#     data = brca_survival_stable)
+# 
+#   n= 302, number of events= 28 
+# 
+#                             coef exp(coef) se(coef)      z Pr(>|z|)    
+# engagement_groupEngager  1.10846   3.02969  0.49734  2.229  0.02583 *  
+# er_statusPositive       -1.35035   0.25915  0.77583 -1.741  0.08177 .  
+# pr_statusPositive       -0.01790   0.98226  0.72957 -0.025  0.98043    
+# her2_statusPositive      0.03269   1.03323  0.45249  0.072  0.94241    
+# stage_simpleStage_II    -0.07471   0.92802  0.66758 -0.112  0.91090    
+# stage_simpleStage_III    0.97823   2.65974  0.69116  1.415  0.15697    
+# stage_simpleStage_IV     2.92377  18.61127  0.80272  3.642  0.00027 ***
+# age_at_index             0.04701   1.04813  0.01470  3.197  0.00139 ** 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                         exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager    3.0297    0.33007   1.14304     8.030
+# er_statusPositive          0.2592    3.85877   0.05664     1.186
+# pr_statusPositive          0.9823    1.01806   0.23508     4.104
+# her2_statusPositive        1.0332    0.96784   0.42564     2.508
+# stage_simpleStage_II       0.9280    1.07757   0.25079     3.434
+# stage_simpleStage_III      2.6597    0.37598   0.68631    10.308
+# stage_simpleStage_IV      18.6113    0.05373   3.85921    89.754
+# age_at_index               1.0481    0.95408   1.01835     1.079
+# 
+# Concordance= 0.829  (se = 0.036 )
+# Likelihood ratio test= 33.37  on 8 df,   p=5e-05
+# Wald test            = 35.31  on 8 df,   p=2e-05
+# Score (logrank) test = 50.27  on 8 df,   p=4e-08
+# 
+
+# 4. Run Proportional Hazards Test (Assumption Check) to determine if the relative risk (HR) is constant over the entire follow-up period
+ph_test <- cox.zph(brca_cox_stable)
+print(ph_test)
+#                  chisq df     p
+# engagement_group  4.452  1 0.035
+# er_status         0.519  1 0.471
+# pr_status         0.455  1 0.500
+# her2_status       1.036  1 0.309
+# stage_simple      2.308  3 0.511
+# age_at_index      1.662  1 0.197
+# GLOBAL           17.856  8 0.022
+
+# Visualizes how the hazard changes over time
+plot(ph_test[1]) # [1] refers to the first variable: engagement_group
+abline(h = 0, col = "red")
+# Result: the risk associated with the engager group is not constant over time but is higher as time increases meaning has more long-term impact than short term impact
+# 
+
+```
+
+## COAD
+### Survival curves
+
+```{r}
+
+# 1. Define the 25% (quartile) cutoffs
+# lower_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.25)
+# upper_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.75)
+
+# 2. Isolate extremes, strictly filter for primary tumors, and merge
+# coad_survival_data <- coad_engagement_scores %>%
+#   filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
+#   mutate(
+#     engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
+#     patient_id = substr(case_id, 1, 12),
+#     sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
+#   ) %>%
+#   # Safeguard 1: Strictly keep only Primary Solid Tumors ("01")
+#   filter(sample_type == "01") %>%
+#   # Safeguard 2: Now safely drop replicate vials (A vs B)
+#   distinct(patient_id, .keep_all = TRUE) %>%
+#   
+#   # Join and build survival variables
+#   inner_join(
+#     coad_clinical %>% distinct(submitter_id, .keep_all = TRUE), 
+#     by = c("patient_id" = "submitter_id")
+#   ) %>%
+#   mutate(
+#     os_time = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
+#     os_status = if_else(vital_status == "Dead", 1, 0)
+#   ) %>%
+#   filter(!is.na(os_time) & os_time > 0 & !is.na(os_status))
+
+coad_survival_data <- coad_engagement_scores %>%
+  mutate(
+    patient_id  = substr(case_id, 1, 12),
+    sample_type = substr(case_id, 14, 15)
+  ) %>%
+  filter(sample_type == "01") %>%
+  distinct(patient_id, .keep_all = TRUE) %>%
+  inner_join(
+    coad_clinical %>% distinct(submitter_id, .keep_all = TRUE),
+    by = c("patient_id" = "submitter_id")
+  ) %>%
+  mutate(
+    os_time   = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
+    os_status = if_else(vital_status == "Dead", 1, 0)
+  ) %>%
+  filter(!is.na(os_time) & os_time > 0 & !is.na(os_status))
+
+# 3. Verify the final dataset
+dim(coad_survival_data)
+#  [1] 389 113
+
+coad_survival_data %>% summarise(above_0.5 = sum(engagement_prob > 0.5))
+# # A tibble: 1 × 1
+#   above_0.5
+#       <int>
+# 1        33
+
+
+
+```
+
+### Plot KM curves
+```{r}
+
+coad_survival_data <- coad_survival_data %>%
+  mutate(engagement_group = factor(
+    if_else(engagement_prob > 0.5, "Engager", "Non-Engager"),
+    levels = c("Engager", "Non-Engager")
+  ))
+
+# See percentage of censored data
+coad_survival_data %>%
+  group_by(engagement_group) %>%
+  summarize(
+    total_n = n(),
+    deaths = sum(os_status == 1),
+    censored = sum(os_status == 0),
+    percent_censored = round((censored / total_n) * 100, 1)
+  )
+
+# A tibble: 2 × 5
+#   engagement_group total_n deaths censored percent_censored
+#   <fct>              <int>  <int>    <int>            <dbl>
+# 1 Engager               33     12       21             63.6
+# 2 Non-Engager          356     83      273             76.7
+
+
+# 1. Fit the survival model using your existing variable name
+coad_survival_data$engagement_group <- factor(
+  coad_survival_data$engagement_group, 
+  levels = c("Engager", "Non-Engager")
+)
+coad_km_fit <- survfit(Surv(os_time, os_status) ~ engagement_group, data = coad_survival_data)
+
+
+# 2. Generate the Kaplan-Meier Plot
+coad_surv_plot <- ggsurvplot(
+  coad_km_fit,
+  data = coad_survival_data,
+  pval = TRUE,
+  risk.table = TRUE,
+  palette = c("#E41A1C", "#377EB8"), 
+  title = "COAD Overall Survival: Engager (prob > 0.5) vs Non-Engager",
+  xlab = "Time (Days)",
+  ylab = "Survival Probability",
+  
+  # Standardize legend position and labels
+  legend = "top",
+  legend.title = "Status",
+  legend.labs = c("Engager", "Non-Engager"),
+  
+  # Granular time axis
+  break.time.by = 1000,
+  ggtheme = theme_minimal()
+)
+
+png("gmm_grouping/survival/coad_survplot_gmm.png", width = 10, height = 7, units = "in", res = 300)
+print(coad_surv_plot)
+dev.off()
+```
+
+### CoxPH
+with covariates
+```{r}
+
+# Force Non-Engager to be the reference group (baseline)
+# coad_survival_data$engagement_group <- relevel(factor(coad_survival_data$engagement_group), ref = "Non-Engager")
+
+# 1. Fit a Multivariate Cox Model
+# include clinical factors
+# coad_cox_model <- coxph(
+#   Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index, 
+#   data = coad_survival_data
+# )
+
+# Continuous Cox model
+coad_cox_model <- coxph(
+  Surv(os_time, os_status) ~ engagement_prob + ajcc_pathologic_stage + age_at_index,
+  data = coad_survival_data
+)
+summary(coad_cox_model)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_prob + 
+#     ajcc_pathologic_stage + age_at_index, data = coad_survival_data)
+# 
+#   n= 349, number of events= 61 
+#    (40 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_prob                  1.059e+00  2.883e+00  5.460e-01  1.939 0.052529 .  
+# ajcc_pathologic_stageStage IA   -1.383e+01  9.825e-07  8.583e+03 -0.002 0.998714    
+# ajcc_pathologic_stageStage II    1.134e+00  3.107e+00  7.162e-01  1.583 0.113443    
+# ajcc_pathologic_stageStage IIA   4.008e-01  1.493e+00  6.632e-01  0.604 0.545562    
+# ajcc_pathologic_stageStage IIB   1.550e+00  4.712e+00  9.149e-01  1.694 0.090187 .  
+# ajcc_pathologic_stageStage III   1.704e+00  5.498e+00  7.673e-01  2.221 0.026338 *  
+# ajcc_pathologic_stageStage IIIA -1.495e+01  3.230e-07  3.449e+03 -0.004 0.996542    
+# ajcc_pathologic_stageStage IIIB  6.934e-01  2.000e+00  7.339e-01  0.945 0.344795    
+# ajcc_pathologic_stageStage IIIC  1.602e+00  4.962e+00  6.792e-01  2.358 0.018364 *  
+# ajcc_pathologic_stageStage IV    2.793e+00  1.633e+01  6.319e-01  4.420 9.86e-06 ***
+# ajcc_pathologic_stageStage IVA   2.419e+00  1.123e+01  7.430e-01  3.255 0.001133 ** 
+# ajcc_pathologic_stageStage IVB  -1.456e+01  4.749e-07  8.894e+03 -0.002 0.998694    
+# age_at_index                     4.468e-02  1.046e+00  1.313e-02  3.402 0.000668 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_prob                 2.883e+00  3.469e-01    0.9885     8.406
+# ajcc_pathologic_stageStage IA   9.825e-07  1.018e+06    0.0000       Inf
+# ajcc_pathologic_stageStage II   3.107e+00  3.218e-01    0.7633    12.648
+# ajcc_pathologic_stageStage IIA  1.493e+00  6.698e-01    0.4070     5.477
+# ajcc_pathologic_stageStage IIB  4.712e+00  2.122e-01    0.7843    28.311
+# ajcc_pathologic_stageStage III  5.498e+00  1.819e-01    1.2219    24.739
+# ajcc_pathologic_stageStage IIIA 3.230e-07  3.096e+06    0.0000       Inf
+# ajcc_pathologic_stageStage IIIB 2.000e+00  4.999e-01    0.4747     8.431
+# ajcc_pathologic_stageStage IIIC 4.962e+00  2.015e-01    1.3106    18.784
+# ajcc_pathologic_stageStage IV   1.633e+01  6.123e-02    4.7333    56.349
+# ajcc_pathologic_stageStage IVA  1.123e+01  8.904e-02    2.6181    48.182
+# ajcc_pathologic_stageStage IVB  4.749e-07  2.106e+06    0.0000       Inf
+# age_at_index                    1.046e+00  9.563e-01    1.0191     1.073
+# 
+# Concordance= 0.802  (se = 0.031 )
+# Likelihood ratio test= 70.55  on 13 df,   p=6e-10
+# Wald test            = 70.74  on 13 df,   p=6e-10
+# Score (logrank) test = 102.9  on 13 df,   p=5e-16
+# 
+
+
+# Now the coxph with the cutoff at 0.5
+coad_survival_data$engagement_group <- relevel(
+  factor(coad_survival_data$engagement_group), ref = "Non-Engager"
+)
+coad_cox_grouped_by_cutoff <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index,
+  data = coad_survival_data
+)
+summary(coad_cox_grouped_by_cutoff)
+
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     ajcc_pathologic_stage + age_at_index, data = coad_survival_data)
+# 
+#   n= 349, number of events= 61 
+#    (40 observations deleted due to missingness)
+# 
+#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
+# engagement_groupEngager          8.373e-01  2.310e+00  3.610e-01  2.320  0.02035 *  
+# ajcc_pathologic_stageStage IA   -1.389e+01  9.237e-07  8.611e+03 -0.002  0.99871    
+# ajcc_pathologic_stageStage II    1.197e+00  3.311e+00  7.161e-01  1.672  0.09458 .  
+# ajcc_pathologic_stageStage IIA   4.020e-01  1.495e+00  6.631e-01  0.606  0.54437    
+# ajcc_pathologic_stageStage IIB   1.513e+00  4.541e+00  9.151e-01  1.654  0.09822 .  
+# ajcc_pathologic_stageStage III   1.787e+00  5.971e+00  7.678e-01  2.327  0.01995 *  
+# ajcc_pathologic_stageStage IIIA -1.503e+01  2.973e-07  3.433e+03 -0.004  0.99651    
+# ajcc_pathologic_stageStage IIIB  7.079e-01  2.030e+00  7.337e-01  0.965  0.33460    
+# ajcc_pathologic_stageStage IIIC  1.608e+00  4.992e+00  6.793e-01  2.367  0.01793 *  
+# ajcc_pathologic_stageStage IV    2.826e+00  1.688e+01  6.285e-01  4.496 6.91e-06 ***
+# ajcc_pathologic_stageStage IVA   2.400e+00  1.102e+01  7.433e-01  3.228  0.00124 ** 
+# ajcc_pathologic_stageStage IVB  -1.459e+01  4.602e-07  8.925e+03 -0.002  0.99870    
+# age_at_index                     4.367e-02  1.045e+00  1.304e-02  3.349  0.00081 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                                 exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager         2.310e+00  4.329e-01    1.1387     4.687
+# ajcc_pathologic_stageStage IA   9.237e-07  1.083e+06    0.0000       Inf
+# ajcc_pathologic_stageStage II   3.311e+00  3.021e-01    0.8135    13.473
+# ajcc_pathologic_stageStage IIA  1.495e+00  6.690e-01    0.4075     5.482
+# ajcc_pathologic_stageStage IIB  4.541e+00  2.202e-01    0.7555    27.295
+# ajcc_pathologic_stageStage III  5.971e+00  1.675e-01    1.3258    26.894
+# ajcc_pathologic_stageStage IIIA 2.973e-07  3.364e+06    0.0000       Inf
+# ajcc_pathologic_stageStage IIIB 2.030e+00  4.927e-01    0.4819     8.549
+# ajcc_pathologic_stageStage IIIC 4.992e+00  2.003e-01    1.3186    18.902
+# ajcc_pathologic_stageStage IV   1.688e+01  5.924e-02    4.9245    57.858
+# ajcc_pathologic_stageStage IVA  1.102e+01  9.075e-02    2.5672    47.297
+# ajcc_pathologic_stageStage IVB  4.602e-07  2.173e+06    0.0000       Inf
+# age_at_index                    1.045e+00  9.573e-01    1.0183     1.072
+# 
+# Concordance= 0.804  (se = 0.031 )
+# Likelihood ratio test= 71.75  on 13 df,   p=4e-10
+# Wald test            = 72.32  on 13 df,   p=3e-10
+# Score (logrank) test = 105.4  on 13 df,   p=<2e-16
+```
+
+
