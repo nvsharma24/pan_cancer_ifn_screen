@@ -65,7 +65,7 @@ library(S4Vectors)
 library(IRanges)
 library(DESeq2)
 library(apeglm)
-library(clusterProfiler)
+#library(clusterProfiler)
 library(msigdbr)
 library(glmnet)
 library(survminer)
@@ -219,11 +219,7 @@ engager_loci_pvals_candidate_cancers %>%
     frac_0 = mean(val < 0.01)
   )
 
-pkr_sample_groups <- pkr_engager_groups %>%
-  filter(group %in% c("Engager", "Non_Engager")) %>%
-  select(sample, cancer_type, frac_accessible, grouping_label = group)
 
-write_tsv(pkr_sample_groups, "pkr/pkr_quartile_grouping/cluster_definitions/pkr_sample_groups_quartile_grouping.tsv")
 ```
 
 # Violin plot and table showing distribution of proportion of loci with p-val <0.05 in each cancer type
@@ -292,6 +288,14 @@ pkr_engager_group_counts %>%
   cols_label(cancer_type = "Cancer Type") %>%
   tab_options(column_labels.background.color = "whitesmoke") %>%
   gtsave("pkr/pkr_quartile_grouping/cluster_definitions/pkr_engager_group_counts.html")
+
+pkr_sample_groups <- pkr_engager_groups %>%
+  filter(group %in% c("Engager", "Non_Engager")) %>%
+  select(sample, cancer_type, frac_accessible, grouping_label = group)
+
+write_tsv(pkr_sample_groups, "pkr/pkr_quartile_grouping/cluster_definitions/pkr_sample_groups_quartile_grouping.tsv")
+
+
 ```
 
 # PASTED FROM GMM GROUPING SCRIPT JUST USE AS REFERENCE 
