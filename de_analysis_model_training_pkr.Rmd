@@ -627,29 +627,32 @@ brca_msigdb_hallmark_pkr_pathways_boxplot
 
 ### COAD 
 ```{r}
-#### Module 1_____________ ####
-coad_deseq2_test <- run_deseq2_core("COAD", gmm_sample_groups_clean, pol3_loci_long, ifn_genes)
+#### Module 1_____ ####
+coad_deseq2_test <- run_deseq2_core("COAD", pkr_sample_groups_clean, ifn_genes)
 coad_deseq2_test$n_per_group
 # non_engager     engager 
-#          26          6
+#          9           7 
 length(coad_deseq2_test$up_genes)
-# [1] 57
+# 45
 coad_deseq2_test$res_df %>% View
-coad_deseq2_test$ifn_overlap
-coad_deseq2_test$genes_with_engager_loci
 
-#### Module 2____________ ####
-# Generate the PCA and Dispersion plots
+coad_deseq2_test$ifn_overlap
+# character(0)
+
+
+
+#### Module 2______ ####
+# Generate the PCA and Dispersion plots and volcano plots
 generate_deseq_qc_plots(coad_deseq2_test)
 
 
-#### Module 3_____________ ####
+#### Module 3______ ####
 # Generate the custom sample-by-sample metric
 coad_gsva_scores <- calculate_sample_scores(coad_deseq2_test)
 
-
-# 
+# Visualize the gene score
 group_colors <- c("non_engager" = "#4575b4", "engager" = "#d73027")
+
 coad_gsva_boxplot <- ggplot(coad_gsva_scores, aes(x = group, y = custom_metric, fill = group)) +
   # Create the boxplot with a bit of transparency
   geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
@@ -676,27 +679,77 @@ coad_gsva_boxplot <- ggplot(coad_gsva_scores, aes(x = group, y = custom_metric, 
   ) +
   stat_compare_means(method = "wilcox.test", label.x = 1.5, label.y = 0.6)
 
-#ggsave("gmm_grouping/gsva/coad_gsva_boxplot.png", plot = coad_gsva_boxplot,
-#       width = 5.5, height = 5, units = "in", dpi = 300)
-
-#### MSigDB interrogation of immune pathways______####
-
-# # 1. Pull the official Hallmark immune sets (re-defining to ensure safe exact-match names)
-# msigdb_hallmark_sets <- msigdbr(species = "human", category = "H")
-# ifn_alpha_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_ALPHA_RESPONSE", ]$gene_symbol
-# ifn_gamma_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE", ]$gene_symbol
-# inflam_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INFLAMMATORY_RESPONSE", ]$gene_symbol
-# 
+ggsave("pkr/pkr_quartile_grouping/gsva/coad_gsva_boxplot.png", plot = coad_gsva_boxplot,
+       width = 5.5, height = 5, units = "in", dpi = 300)
 
 
-# target_pathways <- list(
-#   ifn_alpha = ifn_alpha_list,
-#   ifn_gamma = ifn_gamma_list,
-#   inflammatory = inflam_list,
-#   rigi_ifn_induction = rigi_ifn_list,
-#   rlr_signaling = rlr_list,
-#   ifn_signaling = ifn_sig_list
-# )
+# 2. See which up genes overlap with ifn_genes
+coad_deseq2_ifn_overlap <- intersect(coad_deseq2_test$up_genes, ifn_genes)
+
+# 3. Check the results
+print(paste("Number of overlapping IFN genes:", length(coad_deseq2_ifn_overlap)))
+print(coad_deseq2_ifn_overlap)
+
+
+#### MSigDB interrogation of up genes______####
+# For the PKR relevant pathways need to find the exact msigdb set names. search for terms and see what's available
+all_sets <- msigdbr(species = "human")
+all_sets %>%
+  filter(str_detect(gs_name, "EIF2|PERK|PKR|INTEGRATED_STRESS|ATF4|UNFOLDED")) %>%
+  filter(gs_collection %in% c("H", "C2")) %>%  #Hallmark and curated pathways only %>% 
+  distinct(gs_name, gs_collection, gs_subcollection) %>% View()
+  #write_tsv(.,"~/pkr/pkr_quartile_grouping/gsva/eif2_perk_pkr_integratedstress_atf4_unfolded_related_msigdb_pathways.tsv")
+  #print(n = 100)
+
+all_sets %>%
+  filter(str_detect(gs_name, "NFKB|INFLAMMATOR|TNFA")) %>%
+  filter(gs_collection %in% c("H", "C2")) %>%  #Hallmark and curated pathways only
+  distinct(gs_name, gs_collection, gs_subcollection) %>% View()
+  #write_tsv(.,"~/pkr/pkr_quartile_grouping/gsva/nfkb_inflammatory_tnfa_related_msigdb_pathways.tsv")
+  #print(n = 100)
+
+
+# 1. Pull the official Hallmark immune sets
+msigdb_hallmark_sets <- msigdbr(species = "human", collection = "H")
+ifn_alpha_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_ALPHA_RESPONSE", ]$gene_symbol
+ifn_gamma_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE", ]$gene_symbol
+inflam_list <- msigdb_hallmark_sets[msigdb_hallmark_sets$gs_name == "HALLMARK_INFLAMMATORY_RESPONSE", ]$gene_symbol
+c2_reactome <- msigdbr(species = "human", collection = "C2", subcollection = "CP:REACTOME")
+ifn_sig_list  <- c2_reactome[c2_reactome$gs_name == "REACTOME_INTERFERON_SIGNALING", ]$gene_symbol
+
+# # Pull the RIG-I / RLR-specific sets from C2
+# c2_reactome <- msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
+# c2_kegg     <- msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG_LEGACY")
+# rigi_ifn_list <- c2_reactome[c2_reactome$gs_name == "REACTOME_DDX58_IFIH1_MEDIATED_INDUCTION_OF_INTERFERON_ALPHA_BETA", ]$gene_symbol
+# rlr_list      <- c2_kegg[c2_kegg$gs_name == "KEGG_RIG_I_LIKE_RECEPTOR_SIGNALING_PATHWAY", ]$gene_symbol
+# ifn_sig_list  <- c2_reactome[c2_reactome$gs_name == "REACTOME_INTERFERON_SIGNALING", ]$gene_symbol
+
+# Pull PKR relevant pathways
+c2_all <- msigdbr(species = "human", collection = "C2")
+#eif2_list          <- c2_all[c2_all$gs_name == "BIOCARTA_EIF2_PATHWAY", ]$gene_symbol        # Not relevant
+#pkr_list           <- c2_all[c2_all$gs_name == "REACTOME_PKR_MEDIATED_SIGNALING", ]$gene_symbol # Not relevant
+nfkb_canonical_list <- c2_all[c2_all$gs_name == "WP_CANONICAL_NFKB_PATHWAY", ]$gene_symbol
+inflam_wp_list     <- c2_all[c2_all$gs_name == "WP_INFLAMMATORY_RESPONSE_PATHWAY", ]$gene_symbol
+nfkb_biocarta_list <- c2_all[c2_all$gs_name == "BIOCARTA_NFKB_PATHWAY", ]$gene_symbol
+
+# Create a list of these specific pathways
+target_pathways <- list(
+  HALLMARK_INTERFERON_ALPHA_RESPONSE = ifn_alpha_list,
+  HALLMARK_INTERFERON_GAMMA_RESPONSE = ifn_gamma_list,
+  HALLMARK_INFLAMMATORY_RESPONSE = inflam_list,
+  REACTOME_INTERFERON_SIGNALING = ifn_sig_list,
+  #BIOCARTA_EIF2_PATHWAY = eif2_list,
+  #REACTOME_PKR_MEDIATED_SIGNALING = pkr_list,
+  WP_CANONICAL_NFKB_PATHWAY = nfkb_canonical_list,
+  WP_INFLAMMATORY_RESPONSE_PATHWAY = inflam_wp_list,
+  BIOCARTA_NFKB_PATHWAY = nfkb_biocarta_list
+)
+# Check none are empty
+sapply(target_pathways, length)
+# HALLMARK_INTERFERON_ALPHA_RESPONSE HALLMARK_INTERFERON_GAMMA_RESPONSE     HALLMARK_INFLAMMATORY_RESPONSE      REACTOME_INTERFERON_SIGNALING          WP_CANONICAL_NFKB_PATHWAY 
+#                                 97                                200                                201                                395                                  8 
+#   WP_INFLAMMATORY_RESPONSE_PATHWAY              BIOCARTA_NFKB_PATHWAY 
+#                                 30                                 41
 
 # 2. Extract VST normalized counts and convert Ensembl IDs to Gene Symbols
 vst_coad <- vst(coad_deseq2_test$dds, blind=FALSE)
@@ -705,83 +758,61 @@ rownames(coad_vst_mat) <- coad_deseq2_test$res_df$gene_name[match(rownames(coad_
 coad_vst_mat <- coad_vst_mat[!is.na(rownames(coad_vst_mat)), ]
 
 # 3. Score the COAD samples against ONLY these immune pathways
-coad_immune_gsva <- gsva(expr = coad_vst_mat, 
-                         gset.idx.list = target_pathways, 
-                         method = "gsva", 
+coad_immune_gsva <- gsva(expr = coad_vst_mat,
+                         gset.idx.list = target_pathways,
+                         method = "gsva",
                          verbose = FALSE)
 
-# 4. Format all pathways into a dataframe
+
+# 4. Format all three pathways into a dataframe
 coad_immune_scores <- data.frame(
   case_id = colnames(coad_vst_mat),
-  ifn_alpha = as.numeric(coad_immune_gsva["ifn_alpha", ]),
-  ifn_gamma = as.numeric(coad_immune_gsva["ifn_gamma", ]),
-  inflammatory = as.numeric(coad_immune_gsva["inflammatory", ]),
-  rigi_ifn_induction = as.numeric(coad_immune_gsva["rigi_ifn_induction", ]),
-  rlr_signaling = as.numeric(coad_immune_gsva["rlr_signaling", ]),
-  ifn_signaling = as.numeric(coad_immune_gsva["ifn_signaling", ]),
-  group = coad_deseq2_test$dds$engager_group
+  HALLMARK_INTERFERON_ALPHA_RESPONSE = as.numeric(coad_immune_gsva["HALLMARK_INTERFERON_ALPHA_RESPONSE", ]),
+  HALLMARK_INTERFERON_GAMMA_RESPONSE = as.numeric(coad_immune_gsva["HALLMARK_INTERFERON_GAMMA_RESPONSE", ]),
+  HALLMARK_INFLAMMATORY_RESPONSE = as.numeric(coad_immune_gsva["HALLMARK_INFLAMMATORY_RESPONSE", ]),
+  REACTOME_INTERFERON_SIGNALING = as.numeric(coad_immune_gsva["REACTOME_INTERFERON_SIGNALING", ]),
+  WP_CANONICAL_NFKB_PATHWAY = as.numeric(coad_immune_gsva["WP_CANONICAL_NFKB_PATHWAY", ]),
+  WP_INFLAMMATORY_RESPONSE_PATHWAY = as.numeric(coad_immune_gsva["WP_INFLAMMATORY_RESPONSE_PATHWAY", ]),
+  BIOCARTA_NFKB_PATHWAY = as.numeric(coad_immune_gsva["BIOCARTA_NFKB_PATHWAY", ]),
+  group = coad_deseq2_test$dds$engager_group,
+  check.names = FALSE
 )
 
 # Reshape data for ggplot faceting
 coad_immune_long <- coad_immune_scores %>%
-  pivot_longer(cols = c(ifn_alpha, ifn_gamma, inflammatory,rigi_ifn_induction, rlr_signaling, ifn_signaling),
+  pivot_longer(cols = c(HALLMARK_INTERFERON_ALPHA_RESPONSE, HALLMARK_INTERFERON_GAMMA_RESPONSE,
+                        HALLMARK_INFLAMMATORY_RESPONSE, REACTOME_INTERFERON_SIGNALING,
+                        #BIOCARTA_EIF2_PATHWAY, REACTOME_PKR_MEDIATED_SIGNALING,
+                        WP_CANONICAL_NFKB_PATHWAY, WP_INFLAMMATORY_RESPONSE_PATHWAY,
+                        BIOCARTA_NFKB_PATHWAY),
                names_to = "pathway",
                values_to = "score")
 
-# 5. Plot all three pathways side-by-side with a shared y-axis
-coad_msigdb_hallmark_rigi_pathways_boxplot<- ggplot(coad_immune_long, aes(x = group, y = score, fill = group)) +
+# 5. Plot all pathways side-by-side
+coad_msigdb_hallmark_pkr_pathways_boxplot <- ggplot(coad_immune_long, aes(x = group, y = score, fill = group)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.5, color = "black") +
   geom_jitter(aes(color = group), width = 0.2, size = 2, alpha = 0.8) +
-  facet_wrap(~ pathway) +
+  facet_wrap(~ pathway, labeller = label_wrap_gen(width = 22)) +
   theme_minimal() +
   scale_fill_manual(values = group_colors) +
   scale_color_manual(values = group_colors) +
   labs(
-    title = "COAD: Immune and RIG-I Pathway GSVA Scores", 
+    title = "COAD", 
     y = "GSVA Enrichment Score", 
     x = NULL
   ) +
   theme(
     legend.position = "none", 
     plot.title = element_text(face = "bold", size = 14),
-    axis.text = element_text(size = 11, color = "black"),
-    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 15, color = "black"),
+    strip.text = element_text(size = 16, face = "bold"),
     panel.grid.minor = element_blank()
   ) +
-  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.3)
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.3, size = 5)
 
-#ggsave("gmm_grouping/gsva/coad_msigdb_hallmark_rigi_pathways_boxplot.png", plot = coad_msigdb_hallmark_rigi_pathways_boxplot,
-#       width = 7, height = 7, units = "in", dpi = 300)
-
-# Check which samples score high in each rig-i set and whether they're the same. pull the sample scores for the two sets filtered on engager group
-
-coad_immune_scores %>%
-  filter(group == "engager") %>%
-  mutate(
-    high_rigi = rigi_ifn_induction > median(rigi_ifn_induction),
-    high_rlr  = rlr_signaling > median(rlr_signaling)
-  ) %>%
-  arrange(desc(rigi_ifn_induction)) %>% 
-  select(case_id, rigi_ifn_induction, rlr_signaling, high_rigi, high_rlr)
-
-#                        case_id rigi_ifn_induction rlr_signaling high_rigi high_rlr
-# 1 TCGA-QG-A5YX-01A-11R-A28H-07         0.10792095   0.155633893      TRUE     TRUE
-# 2 TCGA-NH-A50U-01A-33R-A37K-07        -0.05733516   0.003423353      TRUE     TRUE
-# 3 TCGA-AA-A01S-01A-21R-A083-07        -0.12131754  -0.026831583      TRUE    FALSE
-# 4 TCGA-AY-A69D-01A-11R-A37K-07        -0.20292437  -0.019295622     FALSE     TRUE
-# 5 TCGA-AA-A010-01A-01R-A089-07        -0.22216411  -0.023751492     FALSE    FALSE
-# 6 TCGA-SS-A7HO-01A-21R-A37K-07        -0.42300977  -0.327671319     FALSE    FALSE
-
-#### Is there overlap of up genes with other cancertypes?____####
-# 2. See which of 33 genes overlap with ifn_genes
-# coad_deseq2_ifn_overlap <- intersect(coad_deseq2_test$up_genes, ifn_genes)
-# 
-# # 3. Check the results
-# print(paste("Number of overlapping IFN genes:", length(coad_deseq2_ifn_overlap)))
-# print(coad_deseq2_ifn_overlap)
-
-# Check overlap with brca up genes  
-intersect(coad_deseq2_test$up_genes, brca_deseq2_test$up_genes)
+ggsave("pkr/pkr_quartile_grouping/gsva/coad_msigdb_hallmark_pkr_pathways_boxplot.png", plot = coad_msigdb_hallmark_pkr_pathways_boxplot,
+       width = 22, height = 14, units = "in", dpi = 300)
+coad_msigdb_hallmark_pkr_pathways_boxplot
 
 
 
