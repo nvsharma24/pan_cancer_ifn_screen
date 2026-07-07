@@ -108,6 +108,7 @@ library(ggrepel)
 library(PRROC)
 library(conflicted)
 library(webshot2)
+library(pROC)
 
 conflict_prefer("select", "dplyr")
 conflict_prefer("count", "dplyr")
@@ -830,12 +831,12 @@ model_results_list <- list()
 ```{r}
 
 length(brca_deseq2_test$up_genes)
-# 104
+# 125
 
 brca_vst_transform <- vst(brca_deseq2_test$dds, blind = TRUE)
 brca_vst_counts <- assay(brca_vst_transform)
 dim(brca_vst_counts)
-# [1] 39322    30 - 39,322 genes and 30 samples
+# [1] 39657    31 - 39657 genes and 31 samples
 
 
 
@@ -846,11 +847,11 @@ gene_symbols <- brca_deseq2_test$res_df$gene_name[match(rownames(brca_vst_counts
 rownames(brca_vst_counts) <- gene_symbols
 
 
-# 2. Subset to the 104 genes (now that names match) and clean NAs
+# 2. Subset to the up genes (now that names match) and clean NAs
 brca_vst_sig_de_genes <- brca_vst_counts[rownames(brca_vst_counts) %in% brca_deseq2_test$up_genes, ]
 brca_vst_sig_de_genes <- brca_vst_sig_de_genes[!is.na(rownames(brca_vst_sig_de_genes)), ]
 dim(brca_vst_sig_de_genes)
-# [1] 104  30
+# [1] 125  31
 
 # Align Labels and Run LOOCV______####
 
@@ -861,16 +862,16 @@ X <- t(brca_vst_sig_de_genes) # glmnet requires samples as rows
 n_samples <- nrow(X)
 brca_predicted_probs <- numeric(n_samples)
 
-# LOOCV Loop for 104 genes____####
+# LOOCV Loop for up genes____####
 set.seed(42) # For reproducibility in cv.glmnet folds
-#set.seed(7) # Trying different seeds to test robusness
+#set.seed(7) # Trying different seeds to test robustness
 for(i in 1:n_samples) {
   X_train <- X[-i, ]
   y_train <- y[-i]
   X_test  <- X[i, , drop = FALSE]
   
   # alpha=1 for LASSO; binomial for logistic
-  # Using 5 folds for internal CV because training N is small (28)
+  # Using 5 folds for internal CV because training N is small 
   cv_fit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
   
   # Predict probability for the held-out sample
@@ -902,14 +903,14 @@ brca_seed_results %>% summarise(
   r_mean = mean(pearson), r_sd = sd(pearson)
 )
 
-# # A tibble: 1 × 6
+# A tibble: 1 × 6
 #   auc_mean auc_sd auc_min auc_max r_mean   r_sd
 #      <dbl>  <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
-# 1    0.934 0.0334   0.876       1  0.792 0.0207
+# 1    0.879 0.0210   0.825   0.933  0.669 0.0271
 
 # Evaluation and Plotting_____####
 
-library(pROC)
+
 auc_val <- as.numeric(auc(roc(y, brca_predicted_probs, quiet = TRUE)))
 cor_val <- cor(brca_predicted_probs, y)
 
@@ -942,7 +943,7 @@ lasso_boxplot <- ggplot(model_results_list$brca, aes(x = true_label, y = pred_pr
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
 ggsave(
-  filename = "gmm_grouping/model_plots/brca_lasso_boxplot_gmm.png", 
+  filename = "pkr/pkr_quartile_grouping/model_plots/brca_lasso_boxplot_quartile.png", 
   plot = lasso_boxplot, 
   width = 5.5,      # Width in inches
   height = 5,     # Height in inches
@@ -976,7 +977,7 @@ roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
   theme(plot.title = element_text(face = "bold"))
 
 ggsave(
-  filename = "gmm_grouping/model_plots/brca_lasso_roc_curve_gmm.png", 
+  filename = "pkr/pkr_quartile_grouping/model_plots/brca_lasso_roc_curve_quartile.png", 
   plot = roc_plot, 
   width = 6,      # Width in inches
   height = 5,     # Height in inches
@@ -1015,7 +1016,7 @@ pr_plot <- as.data.frame(brca_pr_obj$curve) %>%
   )
 
 ggsave(
-  filename = "gmm_grouping/model_plots/brca_lasso_pr_curve_gmm.png", 
+  filename = "pkr/pkr_quartile_grouping/model_plots/brca_lasso_pr_curve_quartile.png", 
   plot = pr_plot, 
   width = 7,      # Width in inches
   height = 5,     # Height in inches
@@ -1029,7 +1030,7 @@ ggsave(
 ## COAD
 ```{r}
 
-length(coad_deseq2_test$up_genes) # 57 up genes
+length(coad_deseq2_test$up_genes) # 45 up genes
 
 coad_vst_transform <- vst(coad_deseq2_test$dds, blind = TRUE)
 coad_vst_counts <- assay(coad_vst_transform)
@@ -1047,7 +1048,7 @@ rownames(coad_vst_counts) <- coad_gene_symbols
 coad_vst_sig_de_genes <- coad_vst_counts[rownames(coad_vst_counts) %in% coad_deseq2_test$up_genes, ]
 coad_vst_sig_de_genes <- coad_vst_sig_de_genes[!is.na(rownames(coad_vst_sig_de_genes)), ]
 dim(coad_vst_sig_de_genes)
-# [1] 57 32
+# [1] 45 16
 
 # Align Labels and Run LOOCV______####
 
@@ -1094,14 +1095,14 @@ coad_seed_results %>% summarise(
   auc_mean = mean(auc), auc_sd = sd(auc), auc_min = min(auc), auc_max = max(auc),
   r_mean = mean(pearson), r_sd = sd(pearson)
 )
-#  auc_mean auc_sd auc_min auc_max r_mean   r_sd
-#      <dbl>  <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
-# 1    0.902 0.0389   0.821   0.968  0.657 0.0631
+# A tibble: 1 × 6
+#   auc_mean  auc_sd auc_min auc_max r_mean   r_sd
+#      <dbl>   <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
+# 1    0.985 0.00381   0.984       1  0.857 0.0120
 
 # Evaluation and Plotting_____####
 
 # Boxplot with Pearson Correlation ####
-library(pROC)
 auc_val <- as.numeric(auc(roc(y, coad_predicted_probs, quiet = TRUE)))
 cor_val <- cor(coad_predicted_probs, y)
 
@@ -1131,7 +1132,7 @@ lasso_boxplot <- ggplot(model_results_list$coad, aes(x = true_label, y = pred_pr
   stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.4)
 
 ggsave(
-  filename = "gmm_grouping/model_plots/coad_lasso_boxplot.png", 
+  filename = "pkr/pkr_quartile_grouping/model_plots/coad_lasso_boxplot.png", 
   plot = lasso_boxplot, 
   width = 5.5,      # Width in inches
   height = 5,     # Height in inches
@@ -1167,7 +1168,7 @@ roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
   theme(plot.title = element_text(face = "bold"))
 
 ggsave(
-  filename = "gmm_grouping/model_plots/coad_lasso_roc_curve.png", 
+  filename = "pkr/pkr_quartile_grouping/model_plots/coad_lasso_roc_curve.png", 
   plot = roc_plot, 
   width = 6,      # Width in inches
   height = 5,     # Height in inches
@@ -1206,7 +1207,7 @@ pr_plot <- as.data.frame(coad_pr_obj$curve) %>%
   )
 
 ggsave(
-  filename = "gmm_grouping/model_plots/coad_lasso_pr_curve.png", 
+  filename = "pkr/pkr_quartile_grouping/model_plots/coad_lasso_pr_curve.png", 
   plot = pr_plot, 
   width = 7,      # Width in inches
   height = 5,     # Height in inches
@@ -1238,7 +1239,7 @@ rm(brca_clinical_check)
 ```
 
 ### vst normalize 
-To make sure gene expression values are the same scale as the N=30 training set
+To make sure gene expression values are the same scale as the training set
 ```{r}
 # 1. Create the DESeq container for the full cohort
 brca_dds_full <- DESeqDataSetFromMatrix(
@@ -1258,10 +1259,11 @@ rownames(brca_mat_full) <- rowData(brca_full_data$se)$gene_name[match(rownames(b
 ```
 
 ### Get final model
-train on all 30 samples now that we know that the 104 genes are useful for predicting engager/non-engager status from the training set
+train on all samples now that we know that the genes are useful for predicting engager/non-engager status from the training set
 ```{r}
 
 # 1. Train the Master Model on all 30 Discovery Samples
+y <- ifelse(colData(brca_deseq2_test$dds)$engager_group == "engager", 1, 0)
 brca_x_train_sig_de_genes <- t(brca_vst_sig_de_genes) 
 brca_y_labels_sig_de_genes <- y              
 
@@ -1286,7 +1288,7 @@ brca_active_genes %>%
   mutate(gene_symbol = rownames(.)) %>% 
   select(gene_symbol, coefficient) %>% 
   arrange(desc(abs(coefficient))) %>% 
-  write_tsv("~/gmm_grouping/model_plots/brca_lasso_gene_signature_gmm.tsv")
+  write_tsv("~/pkr/pkr_quartile_grouping/model_plots/brca_lasso_gene_signature_quartile.tsv")
 
 # Get genes and weights ####
 brca_gene_signature_table <- brca_active_genes %>% 
@@ -1319,8 +1321,8 @@ brca_gene_signature_table <- brca_active_genes %>%
   ) 
 
 brca_gene_signature_table
-
-
+# Save as html manually via export
+##### *****STOPPED AT STEP ABOVE***** ####
 
 
 # 3. Align the Validation Samples
@@ -1513,7 +1515,7 @@ coad_active_genes %>%
   mutate(gene_symbol = rownames(.)) %>% 
   select(gene_symbol, coefficient) %>% 
   arrange(desc(abs(coefficient))) %>% 
-  write_tsv("gmm_grouping/model_plots/coad_lasso_gene_signature_gmm.tsv")
+  write_tsv("pkr/pkr_quartile_grouping/model_plots/coad_lasso_gene_signature_quartile.tsv")
 
 # Get genes and weights ####
 coad_gene_signature_table <- coad_active_genes %>% 
@@ -1750,7 +1752,7 @@ brca_surv_plot <- ggsurvplot(
   ggtheme = theme_minimal()
 )
 
-png("~/gmm_grouping/survival/brca_survplot_gmm.png", width = 7, height = 7, units = "in", res = 300)
+png("pkr/pkr_quartile_grouping/survival/brca_survplot_quartile.png", width = 7, height = 7, units = "in", res = 300)
 print(brca_surv_plot)
 dev.off()
 
@@ -2229,7 +2231,7 @@ coad_surv_plot <- ggsurvplot(
   ggtheme = theme_minimal()
 )
 
-png("gmm_grouping/survival/coad_survplot_gmm.png", width = 10, height = 7, units = "in", res = 300)
+png("pkr/pkr_quartile_grouping/survival/coad_survplot_quartile.png", width = 10, height = 7, units = "in", res = 300)
 print(coad_surv_plot)
 dev.off()
 ```
