@@ -1290,7 +1290,7 @@ brca_active_genes %>%
   arrange(desc(abs(coefficient))) %>% 
   write_tsv("~/pkr/pkr_quartile_grouping/model_plots/brca_lasso_gene_signature_quartile.tsv")
 
-# Get genes and weights ####
+# 1. Get genes and weights ####
 brca_gene_signature_table <- brca_active_genes %>% 
   as.data.frame() %>% 
   rename(coefficient = 1) %>% 
@@ -1322,44 +1322,71 @@ brca_gene_signature_table <- brca_active_genes %>%
 
 brca_gene_signature_table
 # Save as html manually via export
-##### *****STOPPED AT STEP ABOVE***** ####
 
+# 2. Create a zero-filled matrix for the missing genes (if any) ####
+#brca_x_val_sig_de_genes <- t(brca_mat_full[rownames(brca_vst_sig_de_genes), ])
 
-# 3. Align the Validation Samples
-# Subsetting the large matrix using the exact row order of the discovery matrix
-brca_x_val_sig_de_genes <- t(brca_mat_full[rownames(brca_vst_sig_de_genes), ])
-
-# error in one of the 104 genes doesn't exist in the validation matrix (brca_mat_full). maybe an issue with gene annotations
+# error in line commented out above one of the up genes don't exist in the validation matrix (brca_mat_full). maybe an issue with gene annotations will check and fix
 target_genes <- rownames(brca_vst_sig_de_genes)
 available_genes <- rownames(brca_mat_full)
 
 missing_genes <- setdiff(target_genes, available_genes)
-print(missing_genes) # None of the 14 signature genes are missing. every gene that has a coefficient is present in the full cohort and the model ignores the missing ones anyway
-# [1] "BLTP2"        "LOC124907763" "LOC100128317" "LINC02889"    "GALNT7-DT"    "FARS2-AS1"    "LOC100287808" "LOC124909423"
+print(missing_genes) 
+# [1] "LOC100129540" "LOC112267871" "LOC100129203" "LOC100506444"
 
-# fix
-# 1. Extract the genes that are not missing those aren't in the signature anyway, transpose to patients-as-rows ####
-available_data <- brca_mat_full[rownames(brca_mat_full) %in% target_genes, ] %>% 
-  t()
+# LOC100506444 has largest weight and LOC112267871 is in the gene signature, see if i can find it in the full cohort by ensembl id
+# get ensembl id to the gene symbols in training samples set
+lost_ids <- brca_deseq2_test$res_df %>% 
+  filter(gene_name %in% c("LOC112267871", "LOC100506444")) %>% 
+  pull(ensembl_id)
 
-# 2. Create a zero-filled matrix for the missing genes ####
-missing_data <- matrix(
-  0, 
-  nrow = nrow(available_data), 
-  ncol = length(missing_genes), 
-  dimnames = list(rownames(available_data), missing_genes)
-)
+lost_ids %in% (rowData(brca_full_data$se)$gene_id %>% str_remove("\\..*"))
+# Both ensembl ids are found in the full cohort, will need to use ensembl ids to get the model signature genes for the full cohort matrix
 
-# 3. Bind them together and forcefully reorder columns to match the discovery set exactly ####
-brca_x_val_sig_de_genes <- cbind(available_data, missing_data)[, target_genes]
+# The columns are the 125 up genes the model was trained on
+# Only the 15 with non-zero lasso coefficients (signature genes) affect the score,
+# but predict() function requires all 125 up_gene columns present and in training order. That's why they are zero filled
 
-# Confirm dimensions are 1095 rows, 104 columns
+# Get the ensembl id for each up gene, from the training data 
+brca_upgene_symbols <- rownames(brca_vst_sig_de_genes)
+brca_upgene_id_map <- brca_deseq2_test$res_df %>%
+  filter(gene_name %in% brca_upgene_symbols) %>%
+  distinct(gene_name, ensembl_id)
+
+# Confirm each up_gene symbol maps to exactly one ensembl id (should return 0 rows)
+brca_upgene_id_map %>% count(gene_name) %>% filter(n > 1)
+
+# Copy the full-cohort matrix but label rows by Ensembl ID instead of symbol.
+brca_mat_full_by_ensid <- assay(brca_vst_full)
+rownames(brca_mat_full_by_ensid) <- rowData(brca_full_data$se)$gene_id %>% str_remove("\\..*")
+
+# Pull each up gene from the full cohort by ensembl id, then relabel rows back to symbols
+#    so the column names match the model's coefficient names.
+brca_upgene_ids <- brca_upgene_id_map$ensembl_id[match(brca_upgene_symbols, brca_upgene_id_map$gene_name)]
+brca_upgene_present <- brca_upgene_ids %in% rownames(brca_mat_full_by_ensid)
+brca_x_val_upgenes <- t(brca_mat_full_by_ensid[brca_upgene_ids[brca_upgene_present], , drop = FALSE])
+colnames(brca_x_val_upgenes) <- brca_upgene_symbols[brca_upgene_present]
+
+# Zero-fill any up genes still not found by ensembl id. this is harmless for non-model signature up genes
+#    (zero coeff), but confirm none of these are model signature genes.
+brca_upgenes_missing <- brca_upgene_symbols[!brca_upgene_present]
+if (length(brca_upgenes_missing) > 0) {
+  brca_upgene_zerofill <- matrix(
+    0,
+    nrow = nrow(brca_x_val_upgenes), ncol = length(brca_upgenes_missing),
+    dimnames = list(rownames(brca_x_val_upgenes), brca_upgenes_missing)
+  )
+  brca_x_val_upgenes <- cbind(brca_x_val_upgenes, brca_upgene_zerofill)
+}
+
+# Reorder columns to the exact training order (predict requires matching column order)
+brca_x_val_sig_de_genes <- brca_x_val_upgenes[, brca_upgene_symbols]
 dim(brca_x_val_sig_de_genes)
+# [1] 1095  125
 
-# Clean up temporary debugging variables
-rm(target_genes, available_genes, missing_genes, available_data, missing_data)
 
-# 4. Generate the Engagement Probabilities ####
+# 3. Generate the Engagement Probabilities ####
+# score every patient in the full cohort with the trained signature, output each patient's sample probability of being an engager vs non_engager
 brca_final_probs_sig_de_genes <- predict(
   brca_model_sig_de_genes_final, 
   newx = brca_x_val_sig_de_genes, 
@@ -1367,13 +1394,13 @@ brca_final_probs_sig_de_genes <- predict(
   type = "response"
 )
 
-# 3. Consolidate into a tibble ####
+# 4. Consolidate into a tibble ####
 brca_engagement_scores <- tibble(
   case_id = rownames(brca_final_probs_sig_de_genes),
   engagement_prob = as.numeric(brca_final_probs_sig_de_genes)
 )
 
-# 4. Sanity Check ####
+# 5. Sanity Check ####
 # does  Model successfully identified extremes (near 0 and near 1)
 summary(brca_engagement_scores$engagement_prob) 
 
@@ -1381,19 +1408,19 @@ brca_engagement_scores %>%
   mutate(bin = cut(engagement_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
   count(bin)
 
-# A tibble: 10 × 2
+# # A tibble: 10 × 2
 #    bin           n
 #    <fct>     <int>
-#  1 [0,0.1]    1035
-#  2 (0.1,0.2]    15
-#  3 (0.2,0.3]     7
-#  4 (0.3,0.4]     3
-#  5 (0.4,0.5]     2
-#  6 (0.5,0.6]     4
-#  7 (0.6,0.7]     3
-#  8 (0.7,0.8]     6
-#  9 (0.8,0.9]     7
-# 10 (0.9,1]      13
+#  1 [0,0.1]     393
+#  2 (0.1,0.2]   118
+#  3 (0.2,0.3]    94
+#  4 (0.3,0.4]    70
+#  5 (0.4,0.5]    62
+#  6 (0.5,0.6]    43
+#  7 (0.6,0.7]    51
+#  8 (0.7,0.8]    46
+#  9 (0.8,0.9]    85
+# 10 (0.9,1]     133
 
 brca_engagement_scores %>%
   summarise(
@@ -1403,12 +1430,12 @@ brca_engagement_scores %>%
     n_above_0.1 = sum(engagement_prob > 0.1)
   )
 
-# A tibble: 1 × 4
+# # A tibble: 1 × 4
 #   n_total n_above_0.5 n_above_0.25 n_above_0.1
 #     <int>       <int>        <int>       <int>
-# 1    1095          33           41          60
+# 1    1095         358          537         702
 
-# the model scored 1035 patients low and a small group of high scorers with basically nothing in between. 
+# the probabilities are spread out. will probably take the upper and lower quartiles 
 
 ```
 
@@ -1423,18 +1450,6 @@ ggplot(brca_engagement_scores, aes(x = engagement_prob)) +
     x = "Probability of Engager Status (0 to 1)",
     y = "Density"
   )
-
-# transform y axis so you can see the small population of engagers showing it is bimodal with very few samples in between
-ggplot(brca_engagement_scores, aes(x = engagement_prob)) +
-  geom_histogram(bins = 40, fill = "steelblue", color = "black", alpha = 0.7) +
-  scale_y_sqrt() +
-  theme_minimal() +
-  labs(
-    title = "Distribution of Engager Status Probabilities in BRCA",
-    x = "Probability of Engager Status (0 to 1)",
-    y = "Count (sqrt scale)"
-  ) +
-  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black")
 
 ```
 
@@ -1458,7 +1473,7 @@ rm(coad_clinical_check)
 ```
 
 ### vst normalize 
-To make sure gene expression values are the same scale as the N=32 training set
+To make sure gene expression values are the same scale as training set
 ```{r}
 # 1. Create the DESeq container for the full cohort
 coad_dds_full <- DESeqDataSetFromMatrix(
@@ -1480,6 +1495,8 @@ rownames(coad_mat_full) <- rowData(coad_full_data$se)$gene_name[match(rownames(c
 train on all 17 samples now that we know that the de genes are useful for predicting engager/non-engager status from the training set
 ```{r}
 # 1. Train the Master Model on all 32 Discovery Samples
+y <- ifelse(colData(coad_deseq2_test$dds)$engager_group == "engager", 1, 0)
+length(y)
 coad_x_train_sig_de_genes <- t(coad_vst_sig_de_genes) 
 coad_y_labels <- y               
 
@@ -1497,16 +1514,17 @@ coad_final_weights <- as.matrix(coef(coad_model_sig_de_genes_final, s = "lambda.
 coad_active_genes <- coad_final_weights[coad_final_weights[, 1] != 0, , drop = FALSE]
 print(coad_active_genes) 
 
-#               lambda.min
-# (Intercept) -28.04799122
-# KIF20A        0.28615708
-# SLCO1B1       0.02209004
-# MFSD9         0.46172705
-# SAP130        0.75316390
-# POU4F1        0.92415892
-# SLCO4C1       0.13271767
-# NCAPD2P1      0.95018120
-# RAMACL        0.21975924
+#                lambda.min
+# (Intercept)  -67.45528071
+# JAG1           0.75766863
+# PPARD          3.33776101
+# CHIT1          0.28325655
+# DSC3           0.22773432
+# GPR137C        0.90397350
+# CCK            0.09435162
+# CYP2F1         0.64480312
+# CHURC1         0.43098845
+# LOC102723670   1.93224712
 
 # Save as tsv
 coad_active_genes %>% 
@@ -1517,7 +1535,7 @@ coad_active_genes %>%
   arrange(desc(abs(coefficient))) %>% 
   write_tsv("pkr/pkr_quartile_grouping/model_plots/coad_lasso_gene_signature_quartile.tsv")
 
-# Get genes and weights ####
+# 1. Get genes and weights ####
 coad_gene_signature_table <- coad_active_genes %>% 
   as.data.frame() %>% 
   rename(coefficient = 1) %>% 
@@ -1528,7 +1546,7 @@ coad_gene_signature_table <- coad_active_genes %>%
   gt() %>%
   tab_header(
     title = paste0("COAD ", nrow(coad_active_genes)-1,"-Gene LASSO Signature Coefficients"),
-    subtitle = paste0("Selected from ",length(coad_deseq2_test$up_genes), " Candidate DE Genes (BRCA Cohort)")
+    subtitle = paste0("Selected from ",length(coad_deseq2_test$up_genes), " Candidate DE Genes (COAD Cohort)")
   ) %>%
   cols_label(
     gene_symbol = "Gene Symbol",
@@ -1550,40 +1568,62 @@ coad_gene_signature_table <- coad_active_genes %>%
 coad_gene_signature_table
 
 
-
-# 3. Align the Validation Samples
+# 2. Create a zero-filled matrix for the missing genes (if any) ####
 target_genes <- rownames(coad_vst_sig_de_genes)
 available_genes <- rownames(coad_mat_full)
 
 missing_genes <- setdiff(target_genes, available_genes)
 print(paste("Missing genes:", paste(missing_genes, collapse=", ")))
-# [1] "Missing genes: LOC105373383, LOC100506207"
+# [1] "Missing genes: POU2AF2, GPC1-AS1, LOC651337, LOC102723670"
+intersect(missing_genes, rownames(coad_active_genes))
+# [1] "LOC102723670" 
 
-# 1. Extract the genes we DO have, transpose to patients-as-rows ####
-available_data <- coad_mat_full[rownames(coad_mat_full) %in% target_genes, ] %>% 
-  t()
+# Will try to recover this gene since it's coefficient is 1.93
+lost_ids <- coad_deseq2_test$res_df %>%
+  filter(gene_name == "LOC102723670") %>%
+  pull(ensembl_id)
+lost_ids %in% (rowData(coad_full_data$se)$gene_id %>% str_remove("\\..*"))
 
-# 2. Create a zero-filled matrix for the missing genes (if any) ####
-if(length(missing_genes) > 0) {
-  missing_data <- matrix(
-    0, 
-    nrow = nrow(available_data), 
-    ncol = length(missing_genes), 
-    dimnames = list(rownames(available_data), missing_genes)
+# The columns are the 45 up genes the model was trained on
+# Only the 9 with non-zero lasso coefficients (signature genes) affect the score,
+# but predict() function requires all 45 up_gene columns present and in training order. That's why they are zero filled
+# Get the ensembl id for each up gene, from the training data 
+coad_upgene_symbols <- rownames(coad_vst_sig_de_genes)
+coad_upgene_id_map <- coad_deseq2_test$res_df %>%
+  filter(gene_name %in% coad_upgene_symbols) %>%
+  distinct(gene_name, ensembl_id)
+
+# Confirm each up_gene symbol maps to exactly one ensembl id (should return 0 rows)
+coad_upgene_id_map %>% count(gene_name) %>% filter(n > 1)
+
+# Copy the full-cohort matrix but label rows by Ensembl ID instead of symbol.
+coad_mat_full_by_ensid <- assay(coad_vst_full)
+rownames(coad_mat_full_by_ensid) <- rowData(coad_full_data$se)$gene_id %>% str_remove("\\..*")
+
+# Pull each up gene from the full cohort by ensembl id, then relabel rows back to symbols
+#    so the column names match the model's coefficient names.
+coad_upgene_ids <- coad_upgene_id_map$ensembl_id[match(coad_upgene_symbols, coad_upgene_id_map$gene_name)]
+coad_upgene_present <- coad_upgene_ids %in% rownames(coad_mat_full_by_ensid)
+coad_x_val_upgenes <- t(coad_mat_full_by_ensid[coad_upgene_ids[coad_upgene_present], , drop = FALSE])
+colnames(coad_x_val_upgenes) <- coad_upgene_symbols[coad_upgene_present]
+
+# Zero-fill any up genes still not found by ensembl id. this is harmless for non-model signature up genes
+#    (zero coeff), but confirm none of these are model signature genes.
+coad_upgenes_missing <- coad_upgene_symbols[!coad_upgene_present]
+if (length(coad_upgenes_missing) > 0) {
+  coad_upgene_zerofill <- matrix(
+    0,
+    nrow = nrow(coad_x_val_upgenes), ncol = length(coad_upgenes_missing),
+    dimnames = list(rownames(coad_x_val_upgenes), coad_upgenes_missing)
   )
-  # 3. Bind them together and forcefully reorder columns to match the discovery set exactly ####
-  coad_x_val_sig_de_genes <- cbind(available_data, missing_data)[, target_genes]
-} else {
-  coad_x_val_sig_de_genes <- available_data[, target_genes]
+  coad_x_val_upgenes <- cbind(coad_x_val_upgenes, coad_upgene_zerofill)
 }
 
-# Confirm dimensions 
+# Reorder columns to the exact training order (predict requires matching column order)
+coad_x_val_sig_de_genes <- coad_x_val_upgenes[, coad_upgene_symbols]
 dim(coad_x_val_sig_de_genes)
-# [1] 458  57
 
-# Clean up temporary debugging variables
-rm(target_genes, available_genes, missing_genes, available_data)
-if(exists("missing_data")) rm(missing_data)
+intersect(coad_upgenes_missing, rownames(coad_active_genes))   # should be character(0)
 
 # 4. Generate the Engagement Probabilities ####
 coad_final_probs_sig_de_genes <- predict(
@@ -1593,7 +1633,7 @@ coad_final_probs_sig_de_genes <- predict(
   type = "response"
 )
 
-# 5. Consolidate into a clean, tidy tibble ####
+# 5. Consolidate into a tidy tibble ####
 coad_engagement_scores <- tibble(
   case_id = rownames(coad_final_probs_sig_de_genes),
   engagement_prob = as.numeric(coad_final_probs_sig_de_genes)
@@ -1601,9 +1641,40 @@ coad_engagement_scores <- tibble(
 
 # 6. Sanity Check ####
 summary(coad_engagement_scores$engagement_prob)
-# > summary(coad_engagement_scores$engagement_prob)
 #    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-# 0.01064 0.07856 0.13764 0.20731 0.26790 0.94466 
+# 0.00209 0.67503 0.92021 0.79484 0.98814 1.00000 
+
+# Looks like it's skewed so that the majority of samples are assigned as engagers. might have to do with small training set (7 engagers) and strong model (e.g. high AUC).
+# The opositive coefficients are also relatively large so modest expression may push patients to over 0.5
+
+# To see full shape
+coad_engagement_scores %>%
+  mutate(bin = cut(engagement_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
+  count(bin)
+# A tibble: 10 × 2
+#    bin           n
+#    <fct>     <int>
+#  1 [0,0.1]      11
+#  2 (0.1,0.2]    14
+#  3 (0.2,0.3]    10
+#  4 (0.3,0.4]    18
+#  5 (0.4,0.5]    18
+#  6 (0.5,0.6]    21
+#  7 (0.6,0.7]    29
+#  8 (0.7,0.8]    35
+#  9 (0.8,0.9]    57
+# 10 (0.9,1]     245
+
+coad_engagement_scores %>%
+  summarise(n_total = n(),
+            n_above_0.5 = sum(engagement_prob > 0.5),
+            n_above_0.25 = sum(engagement_prob > 0.25))
+
+# A tibble: 1 × 3
+#   n_total n_above_0.5 n_above_0.25
+#     <int>       <int>        <int>
+# 1     458         387          430
+
 ```
 
 ### Histogram and density plot of engager status probabilities to see if there are multiple populations
@@ -1619,24 +1690,9 @@ ggplot(coad_engagement_scores, aes(x = engagement_prob)) +
     y = "Density"
   )
 
-coad_engagement_scores %>%
-  mutate(bin = cut(engagement_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
-  count(bin)
 
-coad_engagement_scores %>%
-  summarise(
-    n_total = n(),
-    n_above_0.5 = sum(engagement_prob > 0.5),
-    n_above_0.25 = sum(engagement_prob > 0.25)
-  )
 
-#  A tibble: 1 × 3
-#   n_total n_above_0.5 n_above_0.25
-#     <int>       <int>        <int>
-# 1     458          39          121
 
-coad_engagement_scores %>% summarise(n_above_0.5 = sum(engagement_prob > 0.5))
-# 39 above 0.5
 ```
 
 
@@ -1646,15 +1702,15 @@ coad_engagement_scores %>% summarise(n_above_0.5 = sum(engagement_prob > 0.5))
 Get populations by using a threshold for KM curves but note that the coxph model will use the continuous probabilities (refer to notes)
 ```{r}
 
-# NOT DOING - 1. Define the 25% (quartile) cutoffs
-# lower_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.25)
-# upper_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.75)
+# 1. Define the 25% (quartile) cutoffs
+lower_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.25)
+upper_cutoff <- quantile(brca_engagement_scores$engagement_prob, 0.75)
 
 # 2. Isolate extremes, strictly filter for primary tumors, and merge
 brca_survival_data <- brca_engagement_scores %>%
-  #filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
+  filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
   mutate(
-    #engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
+    engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
     patient_id = substr(case_id, 1, 12),
     sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
   ) %>%
@@ -1676,35 +1732,20 @@ brca_survival_data <- brca_engagement_scores %>%
 
 # 3. Verify the final dataset
 dim(brca_survival_data)
-#  [1] 1012  100 - 1012 patients with survival data
+#  [1] 508 100 - 508 patients with survival data
 
-# Check how cutting the probabilities would split the 1012 at two thresholds
-brca_survival_data %>%
-  summarise(
-    above_0.5 = sum(engagement_prob > 0.5)
-    #above_0.1 = sum(engagement_prob > 0.1)
-  )
-# # A tibble: 1 × 1
-#   above_0.5
-#       <int>
-# 1        30
+table(brca_survival_data$engagement_group)
 
-#table(brca_survival_data$engagement_group, brca_survival_data$os_status)
-# Non-Engager 208  38
+    # Engager Non-Engager 
+    #     250         258
 
 
 
 ```
 
 ### Plot KM curves
-cut at 0.5 for the KM curves plot (coxph will be continuous and done separately)
+cut at quartiles for the KM curves plot (coxph will be continuous and done separately)
 ```{r}
-
-brca_survival_data <- brca_survival_data %>%
-  mutate(engagement_group = factor(
-    if_else(engagement_prob > 0.5, "Engager", "Non-Engager"),
-    levels = c("Engager", "Non-Engager")
-  ))
 
 # See percentage of censored data
 brca_survival_data %>%
@@ -1719,8 +1760,8 @@ brca_survival_data %>%
 # # A tibble: 2 × 5
 #   engagement_group total_n deaths censored percent_censored
 #   <fct>              <int>  <int>    <int>            <dbl>
-# 1 Engager               30      5       25             83.3
-# 2 Non-Engager          982    144      838             85.3
+# 1 Engager              250     36      214             85.6
+# 2 Non-Engager          258     40      218             84.5
 
 
 # 1. Fit the survival model using your existing variable name
@@ -1766,48 +1807,47 @@ brca_cox_model <- coxph(
   data = brca_survival_data
 )
 summary(brca_cox_model)
-
 # Call:
 # coxph(formula = Surv(os_time, os_status) ~ engagement_prob + 
 #     ajcc_pathologic_stage + age_at_index, data = brca_survival_data)
 # 
-#   n= 960, number of events= 104 
-#    (52 observations deleted due to missingness)
+#   n= 483, number of events= 55 
+#    (25 observations deleted due to missingness)
 # 
 #                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
-# engagement_prob                  5.495e-01  1.732e+00  6.708e-01  0.819   0.4127    
-# ajcc_pathologic_stageStage IA   -6.445e-01  5.249e-01  6.538e-01 -0.986   0.3242    
-# ajcc_pathologic_stageStage IB   -1.453e+01  4.878e-07  2.423e+03 -0.006   0.9952    
-# ajcc_pathologic_stageStage II    5.786e-01  1.784e+00  1.058e+00  0.547   0.5843    
-# ajcc_pathologic_stageStage IIA   1.598e-01  1.173e+00  3.606e-01  0.443   0.6577    
-# ajcc_pathologic_stageStage IIB   2.440e-01  1.276e+00  3.803e-01  0.641   0.5212    
-# ajcc_pathologic_stageStage IIIA  7.470e-01  2.111e+00  3.943e-01  1.895   0.0581 .  
-# ajcc_pathologic_stageStage IIIB  8.122e-01  2.253e+00  5.479e-01  1.483   0.1382    
-# ajcc_pathologic_stageStage IIIC  6.999e-01  2.014e+00  5.942e-01  1.178   0.2388    
-# ajcc_pathologic_stageStage IV    2.549e+00  1.279e+01  4.072e-01  6.259 3.88e-10 ***
-# ajcc_pathologic_stageStage X     7.106e-01  2.035e+00  7.761e-01  0.916   0.3599    
-# age_at_index                     3.775e-02  1.038e+00  8.408e-03  4.490 7.13e-06 ***
+# engagement_prob                 -1.965e-01  8.216e-01  3.439e-01 -0.571 0.567777    
+# ajcc_pathologic_stageStage IA   -1.206e+00  2.994e-01  1.078e+00 -1.119 0.263284    
+# ajcc_pathologic_stageStage IB   -1.411e+01  7.449e-07  3.159e+03 -0.004 0.996436    
+# ajcc_pathologic_stageStage II    7.795e-01  2.180e+00  1.110e+00  0.702 0.482706    
+# ajcc_pathologic_stageStage IIA   2.955e-01  1.344e+00  4.702e-01  0.628 0.529737    
+# ajcc_pathologic_stageStage IIB   4.588e-01  1.582e+00  4.868e-01  0.942 0.345951    
+# ajcc_pathologic_stageStage IIIA  9.205e-01  2.511e+00  5.139e-01  1.791 0.073260 .  
+# ajcc_pathologic_stageStage IIIB  6.001e-01  1.822e+00  7.129e-01  0.842 0.399862    
+# ajcc_pathologic_stageStage IIIC  1.214e+00  3.368e+00  8.202e-01  1.481 0.138735    
+# ajcc_pathologic_stageStage IV    3.208e+00  2.472e+01  6.235e-01  5.145 2.68e-07 ***
+# ajcc_pathologic_stageStage X     3.042e-01  1.355e+00  1.092e+00  0.278 0.780680    
+# age_at_index                     4.444e-02  1.045e+00  1.168e-02  3.805 0.000142 ***
 # ---
 # Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
 # 
 #                                 exp(coef) exp(-coef) lower .95 upper .95
-# engagement_prob                 1.732e+00  5.773e-01    0.4652     6.451
-# ajcc_pathologic_stageStage IA   5.249e-01  1.905e+00    0.1457     1.891
-# ajcc_pathologic_stageStage IB   4.878e-07  2.050e+06    0.0000       Inf
-# ajcc_pathologic_stageStage II   1.784e+00  5.607e-01    0.2244    14.177
-# ajcc_pathologic_stageStage IIA  1.173e+00  8.523e-01    0.5787     2.379
-# ajcc_pathologic_stageStage IIB  1.276e+00  7.835e-01    0.6056     2.690
-# ajcc_pathologic_stageStage IIIA 2.111e+00  4.738e-01    0.9746     4.571
-# ajcc_pathologic_stageStage IIIB 2.253e+00  4.439e-01    0.7698     6.593
-# ajcc_pathologic_stageStage IIIC 2.014e+00  4.966e-01    0.6283     6.453
-# ajcc_pathologic_stageStage IV   1.279e+01  7.818e-02    5.7577    28.413
-# ajcc_pathologic_stageStage X    2.035e+00  4.913e-01    0.4446     9.317
-# age_at_index                    1.038e+00  9.630e-01    1.0215     1.056
+# engagement_prob                 8.216e-01  1.217e+00   0.41878     1.612
+# ajcc_pathologic_stageStage IA   2.994e-01  3.340e+00   0.03619     2.477
+# ajcc_pathologic_stageStage IB   7.449e-07  1.342e+06   0.00000       Inf
+# ajcc_pathologic_stageStage II   2.180e+00  4.586e-01   0.24734    19.221
+# ajcc_pathologic_stageStage IIA  1.344e+00  7.442e-01   0.53467     3.377
+# ajcc_pathologic_stageStage IIB  1.582e+00  6.320e-01   0.60938     4.108
+# ajcc_pathologic_stageStage IIIA 2.511e+00  3.983e-01   0.91693     6.874
+# ajcc_pathologic_stageStage IIIB 1.822e+00  5.487e-01   0.45066     7.369
+# ajcc_pathologic_stageStage IIIC 3.368e+00  2.969e-01   0.67485    16.811
+# ajcc_pathologic_stageStage IV   2.472e+01  4.045e-02   7.28411    83.925
+# ajcc_pathologic_stageStage X    1.355e+00  7.377e-01   0.15931    11.533
+# age_at_index                    1.045e+00  9.565e-01   1.02178     1.070
 # 
-# Concordance= 0.772  (se = 0.025 )
-# Likelihood ratio test= 74.33  on 12 df,   p=5e-11
-# Wald test            = 99.58  on 12 df,   p=7e-16
-# Score (logrank) test = 155  on 12 df,   p=<2e-16
+# Concordance= 0.772  (se = 0.033 )
+# Likelihood ratio test= 45.92  on 12 df,   p=7e-06
+# Wald test            = 61.11  on 12 df,   p=1e-08
+# Score (logrank) test = 108.8  on 12 df,   p=<2e-16
 
 brca_survival_data$engagement_group <- relevel(
   factor(brca_survival_data$engagement_group), ref = "Non-Engager"
@@ -1818,308 +1858,59 @@ brca_cox_grouped <- coxph(
   data = brca_survival_data
 )
 summary(brca_cox_grouped)
-
-
-```
-
-#### IGNORE -- OLD, using quartile analysis code here where I used a quartile cutoff of probability scores. didn't delete but IGNORE
-with covariates
-```{r}
-
-# Force Non-Engager to be the reference group (baseline)
-brca_survival_data$engagement_group <- relevel(factor(brca_survival_data$engagement_group), ref = "Non-Engager")
-
-# 1. Fit a Multivariate Cox Model
-# include clinical factors
-brca_cox_model <- coxph(
-  Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index, 
-  data = brca_survival_data
-)
-
-# 2. Look at the result
-summary(brca_cox_model)
-
 # Call:
 # coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
 #     ajcc_pathologic_stage + age_at_index, data = brca_survival_data)
 # 
-#   n= 473, number of events= 55 
-#    (27 observations deleted due to missingness)
+#   n= 483, number of events= 55 
+#    (25 observations deleted due to missingness)
 # 
 #                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
-# engagement_groupEngager          6.711e-01  1.956e+00  2.965e-01  2.264 0.023596 *  
-# ajcc_pathologic_stageStage IA   -9.873e-02  9.060e-01  8.751e-01 -0.113 0.910173    
-# ajcc_pathologic_stageStage IB   -1.631e+01  8.250e-08  1.045e+04 -0.002 0.998755    
-# ajcc_pathologic_stageStage II    2.516e+00  1.238e+01  1.152e+00  2.185 0.028915 *  
-# ajcc_pathologic_stageStage IIA  -6.014e-02  9.416e-01  5.867e-01 -0.103 0.918357    
-# ajcc_pathologic_stageStage IIB   2.870e-01  1.332e+00  5.848e-01  0.491 0.623613    
-# ajcc_pathologic_stageStage IIIA  7.354e-01  2.086e+00  6.038e-01  1.218 0.223199    
-# ajcc_pathologic_stageStage IIIB  1.234e+00  3.434e+00  7.112e-01  1.735 0.082789 .  
-# ajcc_pathologic_stageStage IIIC -1.624e+01  8.881e-08  3.274e+03 -0.005 0.996044    
-# ajcc_pathologic_stageStage IV    2.613e+00  1.364e+01  6.019e-01  4.341 1.42e-05 ***
-# ajcc_pathologic_stageStage X     2.155e+00  8.624e+00  1.136e+00  1.897 0.057803 .  
-# age_at_index                     3.709e-02  1.038e+00  1.093e-02  3.392 0.000693 ***
+# engagement_groupEngager         -1.432e-01  8.666e-01  2.993e-01 -0.478 0.632386    
+# ajcc_pathologic_stageStage IA   -1.198e+00  3.018e-01  1.078e+00 -1.111 0.266663    
+# ajcc_pathologic_stageStage IB   -1.410e+01  7.523e-07  3.140e+03 -0.004 0.996417    
+# ajcc_pathologic_stageStage II    7.869e-01  2.197e+00  1.112e+00  0.708 0.479213    
+# ajcc_pathologic_stageStage IIA   2.921e-01  1.339e+00  4.704e-01  0.621 0.534532    
+# ajcc_pathologic_stageStage IIB   4.600e-01  1.584e+00  4.872e-01  0.944 0.345051    
+# ajcc_pathologic_stageStage IIIA  9.214e-01  2.513e+00  5.141e-01  1.792 0.073097 .  
+# ajcc_pathologic_stageStage IIIB  6.086e-01  1.838e+00  7.138e-01  0.853 0.393909    
+# ajcc_pathologic_stageStage IIIC  1.215e+00  3.369e+00  8.204e-01  1.481 0.138736    
+# ajcc_pathologic_stageStage IV    3.202e+00  2.459e+01  6.249e-01  5.124 2.98e-07 ***
+# ajcc_pathologic_stageStage X     3.085e-01  1.361e+00  1.094e+00  0.282 0.777982    
+# age_at_index                     4.459e-02  1.046e+00  1.167e-02  3.819 0.000134 ***
 # ---
 # Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
 # 
 #                                 exp(coef) exp(-coef) lower .95 upper .95
-# engagement_groupEngager         1.956e+00  5.112e-01    1.0942     3.498
-# ajcc_pathologic_stageStage IA   9.060e-01  1.104e+00    0.1630     5.035
-# ajcc_pathologic_stageStage IB   8.250e-08  1.212e+07    0.0000       Inf
-# ajcc_pathologic_stageStage II   1.238e+01  8.079e-02    1.2953   118.280
-# ajcc_pathologic_stageStage IIA  9.416e-01  1.062e+00    0.2982     2.973
-# ajcc_pathologic_stageStage IIB  1.332e+00  7.505e-01    0.4235     4.192
-# ajcc_pathologic_stageStage IIIA 2.086e+00  4.793e-01    0.6389     6.813
-# ajcc_pathologic_stageStage IIIB 3.434e+00  2.912e-01    0.8520    13.841
-# ajcc_pathologic_stageStage IIIC 8.881e-08  1.126e+07    0.0000       Inf
-# ajcc_pathologic_stageStage IV   1.364e+01  7.330e-02    4.1931    44.388
-# ajcc_pathologic_stageStage X    8.624e+00  1.160e-01    0.9312    79.867
-# age_at_index                    1.038e+00  9.636e-01    1.0158     1.060
+# engagement_groupEngager         8.666e-01  1.154e+00   0.48199     1.558
+# ajcc_pathologic_stageStage IA   3.018e-01  3.313e+00   0.03646     2.499
+# ajcc_pathologic_stageStage IB   7.523e-07  1.329e+06   0.00000       Inf
+# ajcc_pathologic_stageStage II   2.197e+00  4.553e-01   0.24838    19.426
+# ajcc_pathologic_stageStage IIA  1.339e+00  7.467e-01   0.53272     3.367
+# ajcc_pathologic_stageStage IIB  1.584e+00  6.313e-01   0.60964     4.116
+# ajcc_pathologic_stageStage IIIA 2.513e+00  3.980e-01   0.91738     6.883
+# ajcc_pathologic_stageStage IIIB 1.838e+00  5.441e-01   0.45361     7.446
+# ajcc_pathologic_stageStage IIIC 3.369e+00  2.968e-01   0.67479    16.821
+# ajcc_pathologic_stageStage IV   2.459e+01  4.067e-02   7.22404    83.672
+# ajcc_pathologic_stageStage X    1.361e+00  7.345e-01   0.15942    11.627
+# age_at_index                    1.046e+00  9.564e-01   1.02194     1.070
 # 
-# Concordance= 0.783  (se = 0.035 )
-# Likelihood ratio test= 58.52  on 12 df,   p=4e-08
-# Wald test            = 53.3  on 12 df,   p=4e-07
-# Score (logrank) test = 107.4  on 12 df,   p=<2e-16
-
-# Add subtype and hormone receptor status as covariates ####
-# Subtypes_____________________
-# Look for the right columns
-TCGAquery_subtype(tumor = "brca") %>% View()
-  colnames(.)
-  
-# Pull official TCGA-BRCA molecular subtypes
-brca_subtypes <- TCGAquery_subtype(tumor = "brca") %>%
-  dplyr::select(patient, subtype = BRCA_Subtype_PAM50)
-
-
-# Hormone receptor status_________________________
-# 1. Query for the Biotab (text table) version of the clinical data
-query_brca_biotab <- GDCquery(
-    project = "TCGA-BRCA",
-    data.category = "Clinical",
-    data.type = "Clinical Supplement",
-    data.format = "BCR Biotab"
-)
-
-# 2. Download the small .txt files (takes seconds)
-GDCdownload(query_brca_biotab)
-
-# 3. Load the tables into a list
-brca_biotab_list <- GDCprepare(query_brca_biotab)
-
-# 4. Extract the specific patient clinical table
-# This is where the hormone receptor status is stored
-brca_hr_status_data <- brca_biotab_list$clinical_patient_brca
-
-# Look for the receptor status columns
-colnames(brca_hr_status_data)[grep("er_status|pr_status|her2_status", colnames(brca_hr_status_data), ignore.case = TRUE)]
-
-# Prepare the clean HR status table
-# 1. Clean the HR table by keeping only real TCGA barcodes
-brca_hr_clean <- brca_hr_status_data %>%
-  filter(grepl("^TCGA-", bcr_patient_barcode)) %>%
-  dplyr::select(
-    patient_id = bcr_patient_barcode, 
-    er_status = er_status_by_ihc, 
-    pr_status = pr_status_by_ihc, 
-    her2_status = her2_status_by_ihc
-  )
-
-# Count how many times each patient appears
-dupe_check <- brca_hr_clean %>%
-  count(patient_id) %>%
-  filter(n > 1)
-print(dupe_check)
-
-
-# Join to survival data
-brca_survival_adj <- brca_survival_data %>%
-  left_join(brca_hr_clean, by = "patient_id")
-
-# Check the first few rows to see the new columns
-head(brca_survival_adj)
-
-# Check the distribution of ER status
-table(brca_survival_adj$er_status, useNA = "always")
-# Not Evaluated]        Negative        Positive            <NA> 
-#              25             123             352               0 
-
-# Check Progesterone Receptor status
-table(brca_survival_adj$pr_status, useNA = "always")
-# [Not Evaluated]   Indeterminate        Negative        Positive            <NA> 
-#              26               1             179             294               0 
-
-# Check HER2 status
-table(brca_survival_adj$her2_status, useNA = "always")
-# [Not Available] [Not Evaluated]       Equivocal   Indeterminate        Negative        Positive            <NA> 
-#               5              86              85               7             236              81               0 
-
-# Only get patients that have definitive positive and negative for multivariate coxph model
-# Create a clean subset for the multivariate model
-brca_survival_final <- brca_survival_adj %>%
-  # Filter to keep only definitive clinical results for all three
-  filter(
-    er_status %in% c("Positive", "Negative"),
-    pr_status %in% c("Positive", "Negative"),
-    her2_status %in% c("Positive", "Negative")
-  ) %>%
-  # Convert to factors so the model treats 'Negative' as the baseline
-  mutate(
-    er_status = factor(er_status, levels = c("Negative", "Positive")),
-    pr_status = factor(pr_status, levels = c("Negative", "Positive")),
-    her2_status = factor(her2_status, levels = c("Negative", "Positive"))
-  )
-nrow(brca_survival_final)
-
-# Ensure engagement_group has the correct baseline
-brca_survival_final$engagement_group <- relevel(factor(brca_survival_final$engagement_group), ref = "Non-Engager")
-
-# Run the final adjusted model
-brca_cox_triple_adj <- coxph(
-  Surv(os_time, os_status) ~ engagement_group + er_status + pr_status + her2_status + ajcc_pathologic_stage + age_at_index, 
-  data = brca_survival_final
-)
-
-# Generate the results
-summary(brca_cox_triple_adj)
-
-# Call:
-# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
-#     er_status + pr_status + her2_status + ajcc_pathologic_stage + 
-#     age_at_index, data = brca_survival_final)
-# 
-#   n= 304, number of events= 28 
-#    (11 observations deleted due to missingness)
-# 
-#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
-# engagement_groupEngager          1.111e+00  3.038e+00  5.082e-01  2.186 0.028784 *  
-# er_statusPositive               -1.410e+00  2.442e-01  7.800e-01 -1.807 0.070723 .  
-# pr_statusPositive                6.139e-02  1.063e+00  7.269e-01  0.084 0.932695    
-# her2_statusPositive              6.348e-02  1.066e+00  4.650e-01  0.137 0.891410    
-# ajcc_pathologic_stageStage IA    6.282e-01  1.874e+00  1.256e+00  0.500 0.616966    
-# ajcc_pathologic_stageStage II   -1.712e+01  3.656e-08  3.475e+04  0.000 0.999607    
-# ajcc_pathologic_stageStage IIA   9.921e-02  1.104e+00  8.165e-01  0.121 0.903298    
-# ajcc_pathologic_stageStage IIB   6.193e-02  1.064e+00  9.139e-01  0.068 0.945974    
-# ajcc_pathologic_stageStage IIIA  1.130e+00  3.095e+00  8.599e-01  1.314 0.188869    
-# ajcc_pathologic_stageStage IIIB  1.594e+00  4.925e+00  9.485e-01  1.681 0.092795 .  
-# ajcc_pathologic_stageStage IIIC -1.644e+01  7.277e-08  6.089e+03 -0.003 0.997846    
-# ajcc_pathologic_stageStage IV    3.071e+00  2.156e+01  9.179e-01  3.345 0.000822 ***
-# ajcc_pathologic_stageStage X    -1.680e+01  5.054e-08  2.664e+04 -0.001 0.999497    
-# age_at_index                     4.382e-02  1.045e+00  1.674e-02  2.617 0.008870 ** 
-# ---
-# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
-# 
-#                                 exp(coef) exp(-coef) lower .95 upper .95
-# engagement_groupEngager         3.038e+00  3.292e-01   1.12198     8.226
-# er_statusPositive               2.442e-01  4.095e+00   0.05295     1.126
-# pr_statusPositive               1.063e+00  9.405e-01   0.25580     4.420
-# her2_statusPositive             1.066e+00  9.385e-01   0.42834     2.651
-# ajcc_pathologic_stageStage IA   1.874e+00  5.336e-01   0.15985    21.974
-# ajcc_pathologic_stageStage II   3.656e-08  2.735e+07   0.00000       Inf
-# ajcc_pathologic_stageStage IIA  1.104e+00  9.056e-01   0.22287     5.472
-# ajcc_pathologic_stageStage IIB  1.064e+00  9.399e-01   0.17741     6.380
-# ajcc_pathologic_stageStage IIIA 3.095e+00  3.231e-01   0.57377    16.697
-# ajcc_pathologic_stageStage IIIB 4.925e+00  2.030e-01   0.76738    31.609
-# ajcc_pathologic_stageStage IIIC 7.277e-08  1.374e+07   0.00000       Inf
-# ajcc_pathologic_stageStage IV   2.156e+01  4.639e-02   3.56692   130.300
-# ajcc_pathologic_stageStage X    5.054e-08  1.979e+07   0.00000       Inf
-# age_at_index                    1.045e+00  9.571e-01   1.01106     1.080
-# 
-# Concordance= 0.857  (se = 0.031 )
-# Likelihood ratio test= 36.51  on 14 df,   p=9e-04
-# Wald test            = 29.98  on 14 df,   p=0.008
-# Score (logrank) test = 57.77  on 14 df,   p=3e-07
-# 
-
-# PROBLEM 
-# coef  exp(coef)   se(coef)      z Pr(>|z|)    
-# ajcc_pathologic_stageStage II   -1.712e+01  3.656e-08  3.475e+04  0.000 0.999607
-# the standard error for Stage II (as well as stage IIIC and stage X) is very high indicating zero events (deaths) happened in this subgroup. will collapse the groups to Stage 1,2,3,4,5
-
-# 1. Collapse sub-stages into major stages to fix zero-event categories
-brca_survival_stable <- brca_survival_final %>%
-  mutate(stage_simple = case_when(
-    grepl("Stage I$|Stage IA|Stage IB", ajcc_pathologic_stage) ~ "Stage_I",
-    grepl("Stage II$|Stage IIA|Stage IIB", ajcc_pathologic_stage) ~ "Stage_II",
-    grepl("Stage III$|Stage IIIA|Stage IIIB|Stage IIIC", ajcc_pathologic_stage) ~ "Stage_III",
-    grepl("Stage IV", ajcc_pathologic_stage) ~ "Stage_IV",
-    TRUE ~ NA_character_
-  )) %>%
-  # Filter out 'Unknown' or 'Stage X' which have no prognostic meaning
-  filter(!is.na(stage_simple)) %>%
-  mutate(stage_simple = factor(stage_simple, levels = c("Stage_I", "Stage_II", "Stage_III", "Stage_IV")))
-
-# 2. Run the stable multivariate Cox model
-brca_cox_stable <- coxph(
-  Surv(os_time, os_status) ~ engagement_group + er_status + pr_status + her2_status + stage_simple + age_at_index, 
-  data = brca_survival_stable
-)
-
-# 3. View Summary
-summary(brca_cox_stable)
-# Call:
-# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
-#     er_status + pr_status + her2_status + stage_simple + age_at_index, 
-#     data = brca_survival_stable)
-# 
-#   n= 302, number of events= 28 
-# 
-#                             coef exp(coef) se(coef)      z Pr(>|z|)    
-# engagement_groupEngager  1.10846   3.02969  0.49734  2.229  0.02583 *  
-# er_statusPositive       -1.35035   0.25915  0.77583 -1.741  0.08177 .  
-# pr_statusPositive       -0.01790   0.98226  0.72957 -0.025  0.98043    
-# her2_statusPositive      0.03269   1.03323  0.45249  0.072  0.94241    
-# stage_simpleStage_II    -0.07471   0.92802  0.66758 -0.112  0.91090    
-# stage_simpleStage_III    0.97823   2.65974  0.69116  1.415  0.15697    
-# stage_simpleStage_IV     2.92377  18.61127  0.80272  3.642  0.00027 ***
-# age_at_index             0.04701   1.04813  0.01470  3.197  0.00139 ** 
-# ---
-# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
-# 
-#                         exp(coef) exp(-coef) lower .95 upper .95
-# engagement_groupEngager    3.0297    0.33007   1.14304     8.030
-# er_statusPositive          0.2592    3.85877   0.05664     1.186
-# pr_statusPositive          0.9823    1.01806   0.23508     4.104
-# her2_statusPositive        1.0332    0.96784   0.42564     2.508
-# stage_simpleStage_II       0.9280    1.07757   0.25079     3.434
-# stage_simpleStage_III      2.6597    0.37598   0.68631    10.308
-# stage_simpleStage_IV      18.6113    0.05373   3.85921    89.754
-# age_at_index               1.0481    0.95408   1.01835     1.079
-# 
-# Concordance= 0.829  (se = 0.036 )
-# Likelihood ratio test= 33.37  on 8 df,   p=5e-05
-# Wald test            = 35.31  on 8 df,   p=2e-05
-# Score (logrank) test = 50.27  on 8 df,   p=4e-08
-# 
-
-# 4. Run Proportional Hazards Test (Assumption Check) to determine if the relative risk (HR) is constant over the entire follow-up period
-ph_test <- cox.zph(brca_cox_stable)
-print(ph_test)
-#                  chisq df     p
-# engagement_group  4.452  1 0.035
-# er_status         0.519  1 0.471
-# pr_status         0.455  1 0.500
-# her2_status       1.036  1 0.309
-# stage_simple      2.308  3 0.511
-# age_at_index      1.662  1 0.197
-# GLOBAL           17.856  8 0.022
-
-# Visualizes how the hazard changes over time
-plot(ph_test[1]) # [1] refers to the first variable: engagement_group
-abline(h = 0, col = "red")
-# Result: the risk associated with the engager group is not constant over time but is higher as time increases meaning has more long-term impact than short term impact
-# 
+# Concordance= 0.771  (se = 0.033 )
+# Likelihood ratio test= 45.83  on 12 df,   p=7e-06
+# Wald test            = 61.02  on 12 df,   p=1e-08
+# Score (logrank) test = 108.7  on 12 df,   p=<2e-16
 
 ```
+
 
 ## COAD
 ### Survival curves
 
 ```{r}
-
+#### CONTINUE HERE ####
 # 1. Define the 25% (quartile) cutoffs
-# lower_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.25)
-# upper_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.75)
+lower_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.25)
+upper_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.75)
 
 # 2. Isolate extremes, strictly filter for primary tumors, and merge
 # coad_survival_data <- coad_engagement_scores %>%
