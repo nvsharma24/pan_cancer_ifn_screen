@@ -1779,7 +1779,7 @@ brca_surv_plot <- ggsurvplot(
   pval = TRUE,
   risk.table = TRUE,
   palette = c("#E41A1C", "#377EB8"), 
-  title = "BRCA Overall Survival: Top vs Bottom Quartile",
+  title = "BRCA Overall Survival",
   xlab = "Time (Days)",
   ylab = "Survival Probability",
   
@@ -1800,7 +1800,6 @@ dev.off()
 ```
 
 ### CoxPH
-#### Continuous cox
 ```{r}
 brca_cox_model <- coxph(
   Surv(os_time, os_status) ~ engagement_prob + ajcc_pathologic_stage + age_at_index,
@@ -1907,74 +1906,49 @@ summary(brca_cox_grouped)
 ### Survival curves
 
 ```{r}
-#### CONTINUE HERE ####
+
 # 1. Define the 25% (quartile) cutoffs
 lower_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.25)
 upper_cutoff <- quantile(coad_engagement_scores$engagement_prob, 0.75)
 
-# 2. Isolate extremes, strictly filter for primary tumors, and merge
-# coad_survival_data <- coad_engagement_scores %>%
-#   filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
-#   mutate(
-#     engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
-#     patient_id = substr(case_id, 1, 12),
-#     sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
-#   ) %>%
-#   # Safeguard 1: Strictly keep only Primary Solid Tumors ("01")
-#   filter(sample_type == "01") %>%
-#   # Safeguard 2: Now safely drop replicate vials (A vs B)
-#   distinct(patient_id, .keep_all = TRUE) %>%
-#   
-#   # Join and build survival variables
-#   inner_join(
-#     coad_clinical %>% distinct(submitter_id, .keep_all = TRUE), 
-#     by = c("patient_id" = "submitter_id")
-#   ) %>%
-#   mutate(
-#     os_time = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
-#     os_status = if_else(vital_status == "Dead", 1, 0)
-#   ) %>%
-#   filter(!is.na(os_time) & os_time > 0 & !is.na(os_status))
-
+#2. Isolate extremes, strictly filter for primary tumors, and merge
 coad_survival_data <- coad_engagement_scores %>%
+  filter(engagement_prob <= lower_cutoff | engagement_prob >= upper_cutoff) %>%
   mutate(
-    patient_id  = substr(case_id, 1, 12),
-    sample_type = substr(case_id, 14, 15)
+    engagement_group = if_else(engagement_prob >= upper_cutoff, "Engager", "Non-Engager"),
+    patient_id = substr(case_id, 1, 12),
+    sample_type = substr(case_id, 14, 15) # Extract the 2-digit sample code
   ) %>%
+  # Safeguard 1: Strictly keep only Primary Solid Tumors ("01")
   filter(sample_type == "01") %>%
+  # Safeguard 2: Now safely drop replicate vials (A vs B)
   distinct(patient_id, .keep_all = TRUE) %>%
+
+  # Join and build survival variables
   inner_join(
     coad_clinical %>% distinct(submitter_id, .keep_all = TRUE),
     by = c("patient_id" = "submitter_id")
   ) %>%
   mutate(
-    os_time   = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
+    os_time = if_else(vital_status == "Dead", days_to_death, days_to_last_follow_up),
     os_status = if_else(vital_status == "Dead", 1, 0)
   ) %>%
   filter(!is.na(os_time) & os_time > 0 & !is.na(os_status))
 
+
 # 3. Verify the final dataset
 dim(coad_survival_data)
-#  [1] 389 113
+#  [1] 188 113
 
-coad_survival_data %>% summarise(above_0.5 = sum(engagement_prob > 0.5))
-# # A tibble: 1 × 1
-#   above_0.5
-#       <int>
-# 1        33
+table(coad_survival_data$engagement_group)
 
-
-
+    # Engager Non-Engager 
+    #      95          93 
 ```
 
 ### Plot KM curves
 ```{r}
 
-coad_survival_data <- coad_survival_data %>%
-  mutate(engagement_group = factor(
-    if_else(engagement_prob > 0.5, "Engager", "Non-Engager"),
-    levels = c("Engager", "Non-Engager")
-  ))
 
 # See percentage of censored data
 coad_survival_data %>%
@@ -1986,11 +1960,11 @@ coad_survival_data %>%
     percent_censored = round((censored / total_n) * 100, 1)
   )
 
-# A tibble: 2 × 5
+# # A tibble: 2 × 5
 #   engagement_group total_n deaths censored percent_censored
-#   <fct>              <int>  <int>    <int>            <dbl>
-# 1 Engager               33     12       21             63.6
-# 2 Non-Engager          356     83      273             76.7
+#   <chr>              <int>  <int>    <int>            <dbl>
+# 1 Engager               95     26       69             72.6
+# 2 Non-Engager           93     18       75             80.6
 
 
 # 1. Fit the survival model using your existing variable name
@@ -2008,7 +1982,7 @@ coad_surv_plot <- ggsurvplot(
   pval = TRUE,
   risk.table = TRUE,
   palette = c("#E41A1C", "#377EB8"), 
-  title = "COAD Overall Survival: Engager (prob > 0.5) vs Non-Engager",
+  title = "COAD Overall Survival",
   xlab = "Time (Days)",
   ylab = "Survival Probability",
   
@@ -2031,122 +2005,153 @@ dev.off()
 with covariates
 ```{r}
 
-# Force Non-Engager to be the reference group (baseline)
-# coad_survival_data$engagement_group <- relevel(factor(coad_survival_data$engagement_group), ref = "Non-Engager")
 
-# 1. Fit a Multivariate Cox Model
-# include clinical factors
-# coad_cox_model <- coxph(
-#   Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index, 
-#   data = coad_survival_data
-# )
-
-# Continuous Cox model
-coad_cox_model <- coxph(
-  Surv(os_time, os_status) ~ engagement_prob + ajcc_pathologic_stage + age_at_index,
-  data = coad_survival_data
-)
-summary(coad_cox_model)
-
-# Call:
-# coxph(formula = Surv(os_time, os_status) ~ engagement_prob + 
-#     ajcc_pathologic_stage + age_at_index, data = coad_survival_data)
-# 
-#   n= 349, number of events= 61 
-#    (40 observations deleted due to missingness)
-# 
-#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
-# engagement_prob                  1.059e+00  2.883e+00  5.460e-01  1.939 0.052529 .  
-# ajcc_pathologic_stageStage IA   -1.383e+01  9.825e-07  8.583e+03 -0.002 0.998714    
-# ajcc_pathologic_stageStage II    1.134e+00  3.107e+00  7.162e-01  1.583 0.113443    
-# ajcc_pathologic_stageStage IIA   4.008e-01  1.493e+00  6.632e-01  0.604 0.545562    
-# ajcc_pathologic_stageStage IIB   1.550e+00  4.712e+00  9.149e-01  1.694 0.090187 .  
-# ajcc_pathologic_stageStage III   1.704e+00  5.498e+00  7.673e-01  2.221 0.026338 *  
-# ajcc_pathologic_stageStage IIIA -1.495e+01  3.230e-07  3.449e+03 -0.004 0.996542    
-# ajcc_pathologic_stageStage IIIB  6.934e-01  2.000e+00  7.339e-01  0.945 0.344795    
-# ajcc_pathologic_stageStage IIIC  1.602e+00  4.962e+00  6.792e-01  2.358 0.018364 *  
-# ajcc_pathologic_stageStage IV    2.793e+00  1.633e+01  6.319e-01  4.420 9.86e-06 ***
-# ajcc_pathologic_stageStage IVA   2.419e+00  1.123e+01  7.430e-01  3.255 0.001133 ** 
-# ajcc_pathologic_stageStage IVB  -1.456e+01  4.749e-07  8.894e+03 -0.002 0.998694    
-# age_at_index                     4.468e-02  1.046e+00  1.313e-02  3.402 0.000668 ***
-# ---
-# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
-# 
-#                                 exp(coef) exp(-coef) lower .95 upper .95
-# engagement_prob                 2.883e+00  3.469e-01    0.9885     8.406
-# ajcc_pathologic_stageStage IA   9.825e-07  1.018e+06    0.0000       Inf
-# ajcc_pathologic_stageStage II   3.107e+00  3.218e-01    0.7633    12.648
-# ajcc_pathologic_stageStage IIA  1.493e+00  6.698e-01    0.4070     5.477
-# ajcc_pathologic_stageStage IIB  4.712e+00  2.122e-01    0.7843    28.311
-# ajcc_pathologic_stageStage III  5.498e+00  1.819e-01    1.2219    24.739
-# ajcc_pathologic_stageStage IIIA 3.230e-07  3.096e+06    0.0000       Inf
-# ajcc_pathologic_stageStage IIIB 2.000e+00  4.999e-01    0.4747     8.431
-# ajcc_pathologic_stageStage IIIC 4.962e+00  2.015e-01    1.3106    18.784
-# ajcc_pathologic_stageStage IV   1.633e+01  6.123e-02    4.7333    56.349
-# ajcc_pathologic_stageStage IVA  1.123e+01  8.904e-02    2.6181    48.182
-# ajcc_pathologic_stageStage IVB  4.749e-07  2.106e+06    0.0000       Inf
-# age_at_index                    1.046e+00  9.563e-01    1.0191     1.073
-# 
-# Concordance= 0.802  (se = 0.031 )
-# Likelihood ratio test= 70.55  on 13 df,   p=6e-10
-# Wald test            = 70.74  on 13 df,   p=6e-10
-# Score (logrank) test = 102.9  on 13 df,   p=5e-16
-# 
-
-
-# Now the coxph with the cutoff at 0.5
+# Fit a multivariate dichotomized cox model
 coad_survival_data$engagement_group <- relevel(
   factor(coad_survival_data$engagement_group), ref = "Non-Engager"
 )
-coad_cox_grouped_by_cutoff <- coxph(
+coad_cox_grouped <- coxph(
   Surv(os_time, os_status) ~ engagement_group + ajcc_pathologic_stage + age_at_index,
   data = coad_survival_data
 )
-summary(coad_cox_grouped_by_cutoff)
-
+# summary(coad_cox_grouped)
 # Call:
 # coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
 #     ajcc_pathologic_stage + age_at_index, data = coad_survival_data)
 # 
-#   n= 349, number of events= 61 
-#    (40 observations deleted due to missingness)
+#   n= 169, number of events= 27 
+#    (19 observations deleted due to missingness)
 # 
-#                                       coef  exp(coef)   se(coef)      z Pr(>|z|)    
-# engagement_groupEngager          8.373e-01  2.310e+00  3.610e-01  2.320  0.02035 *  
-# ajcc_pathologic_stageStage IA   -1.389e+01  9.237e-07  8.611e+03 -0.002  0.99871    
-# ajcc_pathologic_stageStage II    1.197e+00  3.311e+00  7.161e-01  1.672  0.09458 .  
-# ajcc_pathologic_stageStage IIA   4.020e-01  1.495e+00  6.631e-01  0.606  0.54437    
-# ajcc_pathologic_stageStage IIB   1.513e+00  4.541e+00  9.151e-01  1.654  0.09822 .  
-# ajcc_pathologic_stageStage III   1.787e+00  5.971e+00  7.678e-01  2.327  0.01995 *  
-# ajcc_pathologic_stageStage IIIA -1.503e+01  2.973e-07  3.433e+03 -0.004  0.99651    
-# ajcc_pathologic_stageStage IIIB  7.079e-01  2.030e+00  7.337e-01  0.965  0.33460    
-# ajcc_pathologic_stageStage IIIC  1.608e+00  4.992e+00  6.793e-01  2.367  0.01793 *  
-# ajcc_pathologic_stageStage IV    2.826e+00  1.688e+01  6.285e-01  4.496 6.91e-06 ***
-# ajcc_pathologic_stageStage IVA   2.400e+00  1.102e+01  7.433e-01  3.228  0.00124 ** 
-# ajcc_pathologic_stageStage IVB  -1.459e+01  4.602e-07  8.925e+03 -0.002  0.99870    
-# age_at_index                     4.367e-02  1.045e+00  1.304e-02  3.349  0.00081 ***
+#                                       coef  exp(coef)   se(coef)     z Pr(>|z|)  
+# engagement_groupEngager          6.316e-01  1.881e+00  4.451e-01 1.419    0.156  
+# ajcc_pathologic_stageStage II    1.936e-02  1.020e+00  1.460e+04 0.000    1.000  
+# ajcc_pathologic_stageStage IIA   1.705e+01  2.543e+07  7.569e+03 0.002    0.998  
+# ajcc_pathologic_stageStage IIB   2.013e+01  5.512e+08  7.569e+03 0.003    0.998  
+# ajcc_pathologic_stageStage III   2.013e+01  5.533e+08  7.569e+03 0.003    0.998  
+# ajcc_pathologic_stageStage IIIA -2.200e-01  8.026e-01  2.645e+04 0.000    1.000  
+# ajcc_pathologic_stageStage IIIB  1.917e+01  2.124e+08  7.569e+03 0.003    0.998  
+# ajcc_pathologic_stageStage IIIC  2.071e+01  9.849e+08  7.569e+03 0.003    0.998  
+# ajcc_pathologic_stageStage IV    2.153e+01  2.234e+09  7.569e+03 0.003    0.998  
+# ajcc_pathologic_stageStage IVA   2.177e+01  2.856e+09  7.569e+03 0.003    0.998  
+# ajcc_pathologic_stageStage IVB  -2.407e-01  7.861e-01  5.853e+04 0.000    1.000  
+# age_at_index                     4.291e-02  1.044e+00  2.046e-02 2.097    0.036 *
 # ---
 # Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
 # 
 #                                 exp(coef) exp(-coef) lower .95 upper .95
-# engagement_groupEngager         2.310e+00  4.329e-01    1.1387     4.687
-# ajcc_pathologic_stageStage IA   9.237e-07  1.083e+06    0.0000       Inf
-# ajcc_pathologic_stageStage II   3.311e+00  3.021e-01    0.8135    13.473
-# ajcc_pathologic_stageStage IIA  1.495e+00  6.690e-01    0.4075     5.482
-# ajcc_pathologic_stageStage IIB  4.541e+00  2.202e-01    0.7555    27.295
-# ajcc_pathologic_stageStage III  5.971e+00  1.675e-01    1.3258    26.894
-# ajcc_pathologic_stageStage IIIA 2.973e-07  3.364e+06    0.0000       Inf
-# ajcc_pathologic_stageStage IIIB 2.030e+00  4.927e-01    0.4819     8.549
-# ajcc_pathologic_stageStage IIIC 4.992e+00  2.003e-01    1.3186    18.902
-# ajcc_pathologic_stageStage IV   1.688e+01  5.924e-02    4.9245    57.858
-# ajcc_pathologic_stageStage IVA  1.102e+01  9.075e-02    2.5672    47.297
-# ajcc_pathologic_stageStage IVB  4.602e-07  2.173e+06    0.0000       Inf
-# age_at_index                    1.045e+00  9.573e-01    1.0183     1.072
+# engagement_groupEngager         1.881e+00  5.317e-01    0.7861     4.500
+# ajcc_pathologic_stageStage II   1.020e+00  9.808e-01    0.0000       Inf
+# ajcc_pathologic_stageStage IIA  2.543e+07  3.933e-08    0.0000       Inf
+# ajcc_pathologic_stageStage IIB  5.512e+08  1.814e-09    0.0000       Inf
+# ajcc_pathologic_stageStage III  5.533e+08  1.807e-09    0.0000       Inf
+# ajcc_pathologic_stageStage IIIA 8.026e-01  1.246e+00    0.0000       Inf
+# ajcc_pathologic_stageStage IIIB 2.124e+08  4.708e-09    0.0000       Inf
+# ajcc_pathologic_stageStage IIIC 9.849e+08  1.015e-09    0.0000       Inf
+# ajcc_pathologic_stageStage IV   2.234e+09  4.477e-10    0.0000       Inf
+# ajcc_pathologic_stageStage IVA  2.856e+09  3.501e-10    0.0000       Inf
+# ajcc_pathologic_stageStage IVB  7.860e-01  1.272e+00    0.0000       Inf
+# age_at_index                    1.044e+00  9.580e-01    1.0028     1.087
 # 
-# Concordance= 0.804  (se = 0.031 )
-# Likelihood ratio test= 71.75  on 13 df,   p=4e-10
-# Wald test            = 72.32  on 13 df,   p=3e-10
-# Score (logrank) test = 105.4  on 13 df,   p=<2e-16
+# Concordance= 0.903  (se = 0.026 )
+# Likelihood ratio test= 67.51  on 12 df,   p=9e-10
+# Wald test            = 29.62  on 12 df,   p=0.003
+# Score (logrank) test = 91.29  on 12 df,   p=3e-14
+
+# Collapse stage ####
+# stage is split into sub categories so there were many categories that had zero deaths -- the model can't estimate a reliable hazard for it and it runs off to infinity.
+
+coad_survival_data <- coad_survival_data %>%
+  mutate(stage_simple = case_when(
+    grepl("Stage I$|Stage IA|Stage IB", ajcc_pathologic_stage) ~ "Stage_I",
+    grepl("Stage II$|Stage IIA|Stage IIB", ajcc_pathologic_stage) ~ "Stage_II",
+    grepl("Stage III$|Stage IIIA|Stage IIIB|Stage IIIC", ajcc_pathologic_stage) ~ "Stage_III",
+    grepl("Stage IV", ajcc_pathologic_stage) ~ "Stage_IV",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(stage_simple = factor(stage_simple, levels = c("Stage_I","Stage_II","Stage_III","Stage_IV")))
+
+coad_cox_grouped <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + stage_simple + age_at_index,
+  data = coad_survival_data %>% filter(!is.na(stage_simple))
+)
+summary(coad_cox_grouped)
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     stage_simple + age_at_index, data = coad_survival_data %>% 
+#     filter(!is.na(stage_simple)))
+# 
+#   n= 169, number of events= 27 
+# 
+#                              coef exp(coef)  se(coef)     z Pr(>|z|)  
+# engagement_groupEngager 5.268e-01 1.694e+00 4.201e-01 1.254   0.2098  
+# stage_simpleStage_II    1.658e+01 1.595e+07 4.559e+03 0.004   0.9971  
+# stage_simpleStage_III   1.866e+01 1.277e+08 4.559e+03 0.004   0.9967  
+# stage_simpleStage_IV    2.047e+01 7.748e+08 4.559e+03 0.004   0.9964  
+# age_at_index            3.371e-02 1.034e+00 1.924e-02 1.752   0.0798 .
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                         exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager 1.694e+00  5.905e-01    0.7433     3.858
+# stage_simpleStage_II    1.595e+07  6.271e-08    0.0000       Inf
+# stage_simpleStage_III   1.277e+08  7.833e-09    0.0000       Inf
+# stage_simpleStage_IV    7.748e+08  1.291e-09    0.0000       Inf
+# age_at_index            1.034e+00  9.669e-01    0.9960     1.074
+# 
+# Concordance= 0.882  (se = 0.029 )
+# Likelihood ratio test= 55.81  on 5 df,   p=9e-11
+# Wald test            = 33.04  on 5 df,   p=4e-06
+# Score (logrank) test = 77.62  on 5 df,   p=3e-15
+
+# Suspect stage 1 has no events will collapse to early and late stage and re-run as covariate
+coad_survival_data %>%
+  filter(!is.na(stage_simple)) %>%
+  group_by(stage_simple) %>%
+  summarise(n = n(), deaths = sum(os_status == 1)) # Confirms stage 1 has no deaths
+
+# A tibble: 4 × 3
+#   stage_simple     n deaths
+#   <fct>        <int>  <int>
+# 1 Stage_I         32      0
+# 2 Stage_II        62      2
+# 3 Stage_III       50     10
+# 4 Stage_IV        25     15
+
+
+coad_survival_data <- coad_survival_data %>%
+  mutate(stage_binary = if_else(
+    grepl("Stage III|Stage IV", ajcc_pathologic_stage), "Late", "Early"
+  )) %>%
+  mutate(stage_binary = factor(stage_binary, levels = c("Early","Late")))
+
+coad_cox_grouped <- coxph(
+  Surv(os_time, os_status) ~ engagement_group + stage_binary + age_at_index,
+  data = coad_survival_data
+)
+summary(coad_cox_grouped)
+# Call:
+# coxph(formula = Surv(os_time, os_status) ~ engagement_group + 
+#     stage_binary + age_at_index, data = coad_survival_data)
+# 
+#   n= 188, number of events= 44 
+# 
+#                             coef exp(coef) se(coef)     z Pr(>|z|)   
+# engagement_groupEngager 0.471231  1.601966 0.310172 1.519  0.12870   
+# stage_binaryLate        1.020941  2.775806 0.311114 3.282  0.00103 **
+# age_at_index            0.009074  1.009115 0.013650 0.665  0.50619   
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+#                         exp(coef) exp(-coef) lower .95 upper .95
+# engagement_groupEngager     1.602     0.6242    0.8722     2.942
+# stage_binaryLate            2.776     0.3603    1.5086     5.108
+# age_at_index                1.009     0.9910    0.9825     1.036
+# 
+# Concordance= 0.709  (se = 0.037 )
+# Likelihood ratio test= 13.85  on 3 df,   p=0.003
+# Wald test            = 13.72  on 3 df,   p=0.003
+# Score (logrank) test = 14.73  on 3 df,   p=0.002
+
 ```
 
 
