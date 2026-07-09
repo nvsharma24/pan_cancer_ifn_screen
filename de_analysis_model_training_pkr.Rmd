@@ -2154,4 +2154,18 @@ summary(coad_cox_grouped)
 
 ```
 
+### Write out data used for KM curves for BRCA and COAD
+```{r}
+coad_survival_data %>%
+  select(patient_id, engagement_prob, engagement_group, os_time, os_status,
+         ajcc_pathologic_stage, age_at_index) %>%
+  write_tsv("pkr/pkr_quartile_grouping/survival/coad_pkr_km_data.tsv")
+
+brca_survival_data %>%
+  select(patient_id, engagement_prob, engagement_group, os_time, os_status,
+         ajcc_pathologic_stage, age_at_index) %>%
+  write_tsv("pkr/pkr_quartile_grouping/survival/brca_pkr_km_data.tsv")
+
+```
+
 
