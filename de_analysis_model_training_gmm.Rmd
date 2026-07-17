@@ -1936,6 +1936,11 @@ brca_survival_data %>%
 #table(brca_survival_data$engagement_group, brca_survival_data$os_status)
 # Non-Engager 208  38
 
+# Write out data used for km curves
+brca_survival_data %>%
+  select(patient_id, engagement_prob, engagement_group, os_time, os_status,
+         ajcc_pathologic_stage, age_at_index) %>%
+  #write_tsv("gmm_grouping/survival/brca_gmm_km_data.tsv")
 
 
 ```
@@ -2358,7 +2363,7 @@ abline(h = 0, col = "red")
 
 ## COAD
 ### Survival curves
-Get poopulations by taking the top and bottom quartiles
+
 ```{r}
 
 # 1. Define the 25% (quartile) cutoffs
@@ -2416,6 +2421,11 @@ coad_survival_data %>% summarise(above_0.5 = sum(engagement_prob > 0.5))
 #       <int>
 # 1        33
 
+# Write out survival data used for km curves
+coad_survival_data %>%
+  select(patient_id, engagement_prob, engagement_group, os_time, os_status,
+         ajcc_pathologic_stage, age_at_index) %>% #View()
+  #write_tsv("gmm_grouping/survival/coad_gmm_km_data.tsv")
 
 
 ```
