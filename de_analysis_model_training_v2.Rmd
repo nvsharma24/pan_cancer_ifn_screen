@@ -114,11 +114,39 @@ conflict_prefer("count", "dplyr")
 conflict_prefer("filter", "dplyr")
 ```
 
-```{r read objects}
+```{r read objects and files}
 
-#candidate_sample_groups <- readRDS("candidate_sample_groups.rds")
-#pol3_loci_long <- readRDS("pol3_loci_long.rds")
-#pol3_gr <- readRDS("pol3_gr.rds")
+candidate_sample_groups <- readRDS("candidate_sample_groups.rds")
+pol3_loci_long <- readRDS("pol3_loci_long.rds")
+pol3_gr <- readRDS("pol3_gr.rds")
+ifn_genes <- readRDS("~/ifn_genes.rds")
+gmm_sample_groups <- readr::read_tsv("~/gmm_grouping/gmm_sample_groups.tsv")
+gdc_sample_metadata <- read_csv("~/gdc_sample_sheet_1.txt") 
+
+# Reformat gdc_sample_metadata and join it to gmm_groups, then reformat so it will work with downstream functions
+gdc_sample_metadata_clean <- gdc_sample_metadata %>% 
+  mutate(sample = str_replace(project_id, "TCGA-", "") %>% str_replace("-", ".")) 
+
+# Map gmm sample ids to case_id, dedup, and add engager group classification
+gmm_sample_groups_clean <- gmm_sample_groups %>%
+  filter(grouping_label %in% c("Engager", "Non_Engager")) %>%
+  mutate(engager_group = if_else(grouping_label == "Engager", "engager", "non_engager")) %>%
+  left_join(gdc_sample_metadata_clean %>% dplyr::select(sample, case_id, sample_id, sample_type),
+            by = "sample") %>%
+  group_by(case_id) %>%
+  slice_sample(n = 1) %>%
+  ungroup()
+
+gmm_sample_groups_clean %>% filter(is.na(case_id)) %>% nrow()
+gmm_sample_groups_clean %>% count(cancer_type, engager_group)
+
+gmm_sample_groups %>%
+  filter(grouping_label %in% c("Engager", "Non_Engager")) %>%
+  mutate(engager_group = if_else(grouping_label == "Engager", "engager", "non_engager")) %>%
+  left_join(gdc_sample_metadata_clean %>% dplyr::select(sample, case_id), by = "sample") %>%
+  group_by(case_id) %>%
+  filter(n_distinct(engager_group) > 1) %>%
+  ungroup()
 
 ```
 
@@ -2228,6 +2256,10 @@ dim(brca_survival_data)
 table(brca_survival_data$engagement_group, brca_survival_data$os_status)
 # Non-Engager 208  38
 
+brca_survival_data %>%
+  select(patient_id, engagement_prob, engagement_group, os_time, os_status,
+         ajcc_pathologic_stage, age_at_index) %>%
+  write_tsv("survival_analysis_plots/brca_quartile_km_data.tsv")
 
 
 ```
@@ -2619,6 +2651,10 @@ table(coad_survival_data$engagement_group, coad_survival_data$os_status)
   # Engager     71 30
   # Non-Engager 67 24
 
+coad_survival_data %>%
+  select(patient_id, engagement_prob, engagement_group, os_time, os_status,
+         ajcc_pathologic_stage, age_at_index) %>%
+  write_tsv("survival_analysis_plots/coad_quartile_km_data.tsv")
 
 ```
 
